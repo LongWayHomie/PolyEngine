@@ -1,6 +1,12 @@
-# PolyEngine — Polymorphic PE Packer
+# PolyEngine — Polymorphic PE Packer 📦
 
 **PolyEngine** is a research-grade, evasive PE packer designed for CTF challenges and low-level Windows security education. It focuses on bypassing EDR and AV heuristics through a layered stack of in-memory execution and obfuscation techniques.
+
+This is a side project I've been working on for some time. I have used Claude Code to implement and correct some of techniques I wanted to implement in my own PE packer. There's a lot of comments on functions and what they do, since it was a big learning experience for me and Claude does this flawlessly (I'm bad at it). I hope it helps some people to learn some Windows internals or with bypassing some AVs and static detections from more advanced solutions when you tackle those ProLabs 🏯. 
+
+🔥 Big thank you to [MalDevAcademy](https://maldevacademy.com/) for all the materials to create it and inspiration.
+
+🌩 Thanks to [vx-underground](https://x.com/vxunderground) for inspiration via some goofy tweet with silly cat.
 
 > **Disclaimer:** This tool is intended exclusively for authorized security testing, CTF competitions and educational use. Usage against systems without explicit permission is prohibited. The author assumes no liability for misuse.
 
@@ -357,6 +363,7 @@ MASM custom build steps are configured in `Stub.vcxproj` (`HellsHall.asm`) and i
 ---
 
 **Maintained by: Razz** | Built for opsec-conscious security research and fun
+
 *Assistance in implementation done with Claude Code*
 
 ---
