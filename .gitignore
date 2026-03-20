@@ -1,0 +1,42 @@
+# ── Build output ────────────────────────────────────────────────────────────
+x64/
+*/x64/
+*/*/x64/
+
+# ── Visual Studio IDE state ──────────────────────────────────────────────────
+.vs/
+*.user
+*.suo
+*.aps
+*.ncb
+*.sdf
+*.opensdf
+ipch/
+
+# ── Compiler / linker intermediates ─────────────────────────────────────────
+*.obj
+*.pch
+*.ilk
+*.exp
+*.lib
+*.idb
+*.iobj
+*.ipdb
+*.tlog
+*.lastbuildstate
+*.FileListAbsolute.txt
+*.CppClean.log
+*.log
+*.recipe
+
+# ── Binaries that should never be committed ──────────────────────────────────
+# Payloads / samples used for testing — never commit actual implants or shellcode
+*.bin
+*.shellcode
+
+# Packed output executables (Builder output) — rebuild locally
+# Exception: stub.bin is excluded above via *.bin
+
+# ── Claude Code internal files ───────────────────────────────────────────────
+CLAUDE.md
+.claude/
