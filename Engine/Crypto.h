@@ -59,10 +59,13 @@ extern "C" {
  *  guaranteeing each "copy" has unique encryption.
  * ============================================================ */
 typedef struct _COMPOUND_KEY {
-  BYTE key1;    /* XOR sub-key (step 1) – any value 0x00-0xFF */
-  BYTE rotBits; /* rotation bits (step 2) – range 1-7          */
-  BYTE key3;    /* ADD value (step 3) – any value 0x00-0xFF   */
-  BYTE key4;    /* XOR sub-key (step 4) – any value 0x00-0xFF */
+  BYTE key1;       /* XOR sub-key (step 1) – any value 0x00-0xFF              */
+  BYTE rotBits;    /* rotation bits (step 2) – range 1-7                      */
+  BYTE key3;       /* ADD value (step 3) – any value 0x00-0xFF                */
+  BYTE key4;       /* XOR sub-key (step 4) – any value 0x00-0xFF              */
+  BOOL xorSwapped; /* TRUE  → encrypt: XOR k4 first, XOR k1 last             */
+                   /* FALSE → encrypt: XOR k1 first, XOR k4 last  (default)  */
+                   /* Decryptor stub emits keys in matching reversed order.   */
 } COMPOUND_KEY, *PCOMPOUND_KEY;
 
 /* ============================================================

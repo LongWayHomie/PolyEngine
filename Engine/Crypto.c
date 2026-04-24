@@ -53,10 +53,11 @@ void GenerateCompoundKey(PCOMPOUND_KEY pKey) {
   unsigned __int64 tsc = __rdtsc();
   custom_srand((unsigned int)(tsc & 0xFFFFFFFF));
 
-  pKey->key1 = (BYTE)(custom_rand() & 0xFF); /* any value 0-255 */
-  pKey->rotBits = (BYTE)(1 +(custom_rand() % 7)); /* 1-7 (0 = no rotation, 8 = full rotation = NOP) */
-  pKey->key3 = (BYTE)(custom_rand() & 0xFF); /* any value 0-255 */
-  pKey->key4 = (BYTE)(custom_rand() & 0xFF); /* any value 0-255 */
+  pKey->key1       = (BYTE)(custom_rand() & 0xFF);      /* any value 0-255                             */
+  pKey->rotBits    = (BYTE)(1 + (custom_rand() % 7));  /* 1-7 (0 = no rotation, 8 = full rotation = NOP) */
+  pKey->key3       = (BYTE)(custom_rand() & 0xFF);      /* any value 0-255                             */
+  pKey->key4       = (BYTE)(custom_rand() & 0xFF);      /* any value 0-255                             */
+  pKey->xorSwapped = (custom_rand() & 1) ? TRUE : FALSE; /* random outer-XOR order per build           */
 }
 
 /* ============================================================
@@ -72,10 +73,20 @@ void CompoundEncrypt(PBYTE pData, SIZE_T dataLen, const COMPOUND_KEY *pKey) {
   for (SIZE_T i = 0; i < dataLen; i++) {
     BYTE b = pData[i];
 
-    b ^= pKey->key1;              /* Step 1: XOR */
-    b = _rotl8(b, pKey->rotBits); /* Step 2: ROL (left rotation) */
-    b += pKey->key3; /* Step 3: ADD (mod 256 – automatic overflow) */
-    b ^= pKey->key4; /* Step 4: XOR */
+    if (!pKey->xorSwapped) {
+      /* Default order: XOR k1 → ROL → ADD k3 → XOR k4 */
+      b ^= pKey->key1;
+      b = _rotl8(b, pKey->rotBits);
+      b += pKey->key3;
+      b ^= pKey->key4;
+    } else {
+      /* Swapped order: XOR k4 → ROL → ADD k3 → XOR k1
+       * Decryptor reverses this as: XOR k1 → SUB k3 → ROR → XOR k4 */
+      b ^= pKey->key4;
+      b = _rotl8(b, pKey->rotBits);
+      b += pKey->key3;
+      b ^= pKey->key1;
+    }
 
     pData[i] = b;
   }

