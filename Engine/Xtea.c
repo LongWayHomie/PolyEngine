@@ -11,62 +11,32 @@
 
 #include "Xtea.h"
 
-/* ============================================================
- *  XTEA_DELTA — the round constant
- *
- *  Value: 0x9E3779B9 = floor((phi - 1) * 2^32)
- *         where phi = (1 + sqrt(5)) / 2 ≈ 1.6180339887...
- *
- *  Using an irrational number ensures the constant has no
- *  exploitable algebraic structure — a "nothing-up-my-sleeve"
- *  value (same philosophy used in SHA-1 and MD5 round constants).
- *
- *  The key index alternates between sum&3 and (sum>>11)&3 because
- *  delta is chosen so that after 32 additions the index visits
- *  all four key words a non-uniform number of times, preventing
- *  trivial related-key attacks.
- * ============================================================ */
-#define XTEA_DELTA  0x9E3779B9u
-
-/* Number of full rounds. 32 rounds = 64 half-rounds, which is
- * the original authors' recommended minimum for security. */
+/* XTEA_DELTA (0x9E3779B9 = floor((phi-1)*2^32)) — computed at runtime via
+ * volatile XOR split so the literal never appears in the binary as-is.
+ * 0xDEADBEEF ^ 0x409AC756 == 0x9E3779B9 */
 #define XTEA_ROUNDS 32
+
+static DWORD ComputeXteaDelta(void) {
+    volatile DWORD a = 0xDEADBEEFu;
+    volatile DWORD b = 0x409AC756u;
+    return a ^ b;
+}
 
 /* ============================================================
  *  Xtea_EncryptBlock (internal — not exposed in header)
  *
  *  Encrypts a single 64-bit block in-place.
- *
- *  v[2]   : two 32-bit words representing the 64-bit block.
- *  key[4] : four 32-bit words representing the 128-bit key.
- *
- *  Round structure (one full round = two half-rounds):
- *
- *    Half-round 1:
- *      v0 += (((v1 << 4) ^ (v1 >> 5)) + v1) ^ (sum + key[sum & 3])
- *      sum += delta
- *
- *    Half-round 2:
- *      v1 += (((v0 << 4) ^ (v0 >> 5)) + v0) ^ (sum + key[(sum >> 11) & 3])
- *
- *  The shifts <<4 and >>5 create a non-linear avalanche: changing
- *  one bit in v1 affects bits 4 positions higher and 5 lower,
- *  which then propagate through XOR and addition into v0.
+ *  delta — XTEA round constant, computed once by the caller.
  * ============================================================ */
-static void Xtea_EncryptBlock(DWORD v[2], const DWORD key[4])
+static void Xtea_EncryptBlock(DWORD v[2], const DWORD key[4], DWORD delta)
 {
     DWORD v0  = v[0];
     DWORD v1  = v[1];
     DWORD sum = 0;
 
     for (int i = 0; i < XTEA_ROUNDS; i++) {
-        /* Half-round 1: update v0 using v1 and current key word */
         v0 += (((v1 << 4) ^ (v1 >> 5)) + v1) ^ (sum + key[sum & 3]);
-        sum += XTEA_DELTA;
-
-        /* Half-round 2: update v1 using updated v0 and next key word.
-         * (sum >> 11) & 3 selects a different key word than sum & 3,
-         * ensuring v0 and v1 use different key material each round. */
+        sum += delta;
         v1 += (((v0 << 4) ^ (v0 >> 5)) + v0) ^ (sum + key[(sum >> 11) & 3]);
     }
 
@@ -113,36 +83,35 @@ static void Xtea_EncryptBlock(DWORD v[2], const DWORD key[4])
  * ============================================================ */
 void Xtea_DeriveKey(DWORD key[4], const DWORD salt[4])
 {
-    /* ---- k0: start from the XTEA delta itself ----
-     * 0x9E3779B9 is already in this translation unit, so the compiler
-     * is unlikely to emit it as a separate .data constant.
-     * The rotate-mix spreads all 32 bits before we add a second constant. */
-    DWORD k0 = 0x9E3779B9u;                 /* golden-ratio constant        */
-    k0 ^= (k0 >> 11) | (k0 << 21);         /* rotate-mix: diffuse all bits */
-    k0 += 0x5A827999u;                      /* + floor(sqrt(2)/2 * 2^32)    */
+    /* All 5 seed constants are split via volatile XOR pairs — none appear as
+     * 4-byte literals in the binary, preventing static constant matching.
+     * Pre-image pairs (A ^ B):
+     *   0x9E3779B9 = 0xDEADBEEF ^ 0x409AC756  (phi,   golden ratio)
+     *   0x5A827999 = 0xDEADBEEF ^ 0x842FC776  (sqrt2 / 2)
+     *   0x6ED9EBA1 = 0xDEADBEEF ^ 0xB074554E  (sqrt3 / 2)
+     *   0x8F1BBCDC = 0xDEADBEEF ^ 0x51B60233  (sqrt5 / 4)
+     *   0xCA62C1D6 = 0xDEADBEEF ^ 0x14CF7F39  (sqrt10 / 4)         */
+    volatile DWORD _mask = 0xDEADBEEFu;
 
-    /* ---- k1: derived from k0, mixed with sqrt(3)-based seed ----
-     * Rotating k0 by 7 before XOR ensures k1 differs from k0 in all bits,
-     * even if the XOR constant shared several bits. */
-    DWORD k1 = (k0 >> 7) | (k0 << 25);     /* rotate k0 right 7            */
-    k1 ^= 0x6ED9EBA1u;                      /* XOR floor(sqrt(3)/2 * 2^32)  */
-    k1 += k0;                               /* add k0: creates inter-word   */
-                                            /* dependency (avalanche)        */
+    /* ---- k0: golden-ratio base ---- */
+    DWORD k0 = _mask ^ 0x409AC756u;         /* 0x9E3779B9                   */
+    k0 ^= (k0 >> 11) | (k0 << 21);
+    k0 += _mask ^ 0x842FC776u;              /* + 0x5A827999 (sqrt2/2)       */
 
-    /* ---- k2: combines k0 and k1 with sqrt(5)-based seed ----
-     * Rotating k1 by 17 (a prime) before XOR avoids bit-alignment symmetry
-     * between k1 and k2. */
+    /* ---- k1: sqrt(3)-mixed ---- */
+    DWORD k1 = (k0 >> 7) | (k0 << 25);
+    k1 ^= _mask ^ 0xB074554Eu;             /* XOR 0x6ED9EBA1 (sqrt3/2)     */
+    k1 += k0;
+
+    /* ---- k2: sqrt(5)-mixed ---- */
     DWORD k2 = k0 ^ k1;
-    k2 ^= (k1 << 17) | (k1 >> 15);         /* rotate k1 left 17            */
-    k2 += 0x8F1BBCDCu;                      /* + floor(sqrt(5)/4 * 2^32)    */
+    k2 ^= (k1 << 17) | (k1 >> 15);
+    k2 += _mask ^ 0x51B60233u;             /* + 0x8F1BBCDC (sqrt5/4)       */
 
-    /* ---- k3: all previous words XOR'd, then mixed with sqrt(10) seed ----
-     * XOR of all three ensures k3 is sensitive to every bit of k0..k2.
-     * Adding a rotated k2 (instead of a fixed constant) creates a non-trivial
-     * dependency chain that a decompiler must fully unroll to evaluate. */
+    /* ---- k3: sqrt(10)-mixed ---- */
     DWORD k3 = k0 ^ k1 ^ k2;
-    k3 += (k2 >> 11) | (k2 << 21);         /* add rotated k2               */
-    k3 ^= 0xCA62C1D6u;                      /* XOR floor(sqrt(10)/4 * 2^32) */
+    k3 += (k2 >> 11) | (k2 << 21);
+    k3 ^= _mask ^ 0x14CF7F39u;             /* XOR 0xCA62C1D6 (sqrt10/4)    */
 
     /* XOR each key word with the per-build salt supplied by the caller.
      * Builder generates salt via CryptGenRandom and stores it plaintext
@@ -186,13 +155,15 @@ void Xtea_Crypt(PBYTE pData, SIZE_T dataLen, const DWORD key[4])
     DWORD ctr_lo = 0;  /* low  32 bits */
     DWORD ctr_hi = 0;  /* high 32 bits */
 
+    DWORD delta = ComputeXteaDelta();  /* compute once; reused for every block */
+
     SIZE_T i = 0;
     while (i < dataLen) {
 
         /* Step 1: copy current counter into a temporary block and encrypt it.
          * The encrypted block is our keystream for the next 8 bytes of data. */
         DWORD block[2] = { ctr_lo, ctr_hi };
-        Xtea_EncryptBlock(block, key);
+        Xtea_EncryptBlock(block, key, delta);
 
         /* Step 2: XOR up to 8 data bytes with the keystream.
          * Casting block to PBYTE lets us access the keystream byte-by-byte,
