@@ -40,3 +40,4 @@ ipch/
 # ── Claude Code internal files ───────────────────────────────────────────────
 CLAUDE.md
 .claude/
+CHANGELOG.md
