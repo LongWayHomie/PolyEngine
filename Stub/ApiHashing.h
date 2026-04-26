@@ -25,6 +25,7 @@ void ApiHashing_InitHashes(void);
 
 extern DWORD g_Hash_ntdll;
 extern DWORD g_Hash_kernel32;
+extern DWORD g_Hash_kernelbase;
 extern DWORD g_Hash_ZwCreateSection;
 extern DWORD g_Hash_ZwMapViewOfSection;
 extern DWORD g_Hash_ZwUnmapViewOfSection;

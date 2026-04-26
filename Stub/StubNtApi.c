@@ -62,6 +62,10 @@ NTSTATUS NTAPI Sys_NtQueueApcThread(HANDLE ThreadHandle, PVOID ApcRoutine, PVOID
     SYSCALL_WRAPPER(g_Hash_ZwQueueApcThread, pfnNtQueueApcThread, ThreadHandle, ApcRoutine, ApcArgument1, ApcArgument2, ApcArgument3);
 }
 
+NTSTATUS NTAPI Sys_NtOpenSection(PHANDLE SectionHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes) {
+    SYSCALL_WRAPPER(g_Hash_ZwOpenSection, pfnNtOpenSection, SectionHandle, DesiredAccess, ObjectAttributes);
+}
+
 // Redirect global pointers to our local wrappers
 pfnNtCreateSection         pNtCreateSection         = Sys_NtCreateSection;
 pfnNtMapViewOfSection      pNtMapViewOfSection      = Sys_NtMapViewOfSection;
@@ -75,6 +79,7 @@ pfnNtAllocateVirtualMemory pNtAllocateVirtualMemory = Sys_NtAllocateVirtualMemor
 pfnNtFlushInstructionCache pNtFlushInstructionCache = Sys_NtFlushInstructionCache;
 pfnNtQueueApcThread           pNtQueueApcThread           = Sys_NtQueueApcThread;
 pfnNtProtectVirtualMemory     pNtProtectVirtualMemory     = Sys_NtProtectVirtualMemory;
+pfnNtOpenSection			  pNtOpenSection              = Sys_NtOpenSection;
 
 BOOL InitNtApi(void) {
     // NT API Pointers now natively point to our Indirect Syscalls Engine.

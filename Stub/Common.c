@@ -35,6 +35,16 @@ void* __cdecl custom_memcpy(void* dest, const void* src, size_t count) {
     return memcpy(dest, src, count);
 }
 
+int __cdecl custom_memcmp(const void* p1, const void* p2, size_t count) {
+    const unsigned char* a = (const unsigned char*)p1;
+    const unsigned char* b = (const unsigned char*)p2;
+    while (count--) {
+        if (*a != *b) return (int)*a - (int)*b;
+        a++; b++;
+    }
+    return 0;
+}
+
 /* 
  * =========================================================================
  *  String functions

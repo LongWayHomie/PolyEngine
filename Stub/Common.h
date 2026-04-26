@@ -18,6 +18,7 @@ extern "C" {
 /* Custom memory functions (marked as built-in) */
 void* __cdecl custom_memset(void* pTarget, int value, size_t cbTarget);
 void* __cdecl custom_memcpy(void* dest, const void* src, size_t count);
+int   __cdecl custom_memcmp(const void* p1, const void* p2, size_t count);
 
 /* Custom string functions */
 SIZE_T custom_strlen(const char* str);

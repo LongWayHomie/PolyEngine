@@ -132,6 +132,18 @@ typedef NTSTATUS(NTAPI *pfnNtUnmapViewOfSection)(HANDLE ProcessHandle,
 typedef NTSTATUS(NTAPI *pfnNtClose)(HANDLE Handle);
 
 /*
+ * NtOpenSection – opens an existing section object by name
+ *
+ * SectionHandle   – [out] handle to the opened section
+ * DesiredAccess   – access rights 
+ * ObjectAttributes – attributes 
+ */ 
+typedef NTSTATUS(NTAPI *pfnNtOpenSection)(
+    PHANDLE SectionHandle, ACCESS_MASK DesiredAccess,
+	POBJECT_ATTRIBUTES ObjectAttributes);
+
+extern pfnNtOpenSection pNtOpenSection;
+/*
  * NtCreateThreadEx – creates a new thread in any process
  *
  * This is the key function for "remote thread injection":
