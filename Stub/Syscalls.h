@@ -1,6 +1,6 @@
 /*
  * ==========================================================================
- *  Syscalls.h – Indirect Syscalls via FreshyCalls/KnownDlls and HellsHall
+ *  Syscalls.h – Indirect Syscalls via FreshyCalls SSN sort and HellsHall
  * ==========================================================================
  */
 
@@ -15,8 +15,9 @@ extern "C" {
 
 /*
  * Initialize the Syscall environment.
- * Maps \KnownDlls\ntdll.dll, parses Export Directory, and builds a sorted
- * structure to resolve System Service Numbers (SSNs) and Trampolines.
+ * Parses process ntdll's Export Directory, sorts Zw* RVAs to derive SSNs
+ * (FreshyCalls), and locates a `syscall; ret` site in ntdll's .text for use
+ * as the indirect-syscall trampoline.
  */
 BOOL Syscalls_Init(void);
 
