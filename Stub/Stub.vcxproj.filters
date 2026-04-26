@@ -38,9 +38,6 @@
     <ClCompile Include="Syscalls.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="VehSpoof.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="ModuleStomping.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -51,6 +48,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="TlsCallback.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Unhooker.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="StackSpoof.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -85,9 +88,6 @@
     <ClInclude Include="Syscalls.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="VehSpoof.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="ModuleStomping.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -98,6 +98,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\Engine\OpsecFlags.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Unhooker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="StackSpoof.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

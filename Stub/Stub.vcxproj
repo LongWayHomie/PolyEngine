@@ -204,6 +204,7 @@
     <ClCompile Include="..\Engine\Crypto.c" />
     <ClCompile Include="..\Engine\RunPE.c" />
     <ClCompile Include="..\Engine\Xtea.c" />
+    <ClCompile Include="StackSpoof.c" />
     <ClCompile Include="Stub.cpp" />
     <ClCompile Include="Common.c" />
     <ClCompile Include="ApiHashing.cpp" />
@@ -211,7 +212,7 @@
     <ClCompile Include="Opsec.c" />
     <ClCompile Include="StubNtApi.c" />
     <ClCompile Include="Syscalls.c" />
-    <ClCompile Include="VehSpoof.c" />
+    <ClCompile Include="Unhooker.c" />
     <ClCompile Include="ModuleStomping.c" />
     <ClCompile Include="Evasion.cpp" />
     <ClCompile Include="TlsCallback.c" />
@@ -226,9 +227,10 @@
     <ClInclude Include="ApiHashing.h" />
     <ClInclude Include="Payload.h" />
     <ClInclude Include="Opsec.h" />
+    <ClInclude Include="StackSpoof.h" />
     <ClInclude Include="Structs.h" />
     <ClInclude Include="Syscalls.h" />
-    <ClInclude Include="VehSpoof.h" />
+    <ClInclude Include="Unhooker.h" />
     <ClInclude Include="ModuleStomping.h" />
     <ClInclude Include="Evasion.h" />
     <ClInclude Include="..\Engine\OpsecFlags.h" />
