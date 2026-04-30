@@ -221,13 +221,13 @@ static BOOL ParseArgs(int argc, char* argv[], BUILD_CONFIG* cfg) {
                 }
                 cfg->dll_indices[0] = rnd[0] % 10;
                 cfg->dll_indices[1] = rnd[1] % 10;
-                if (cfg->dll_indices[1] == cfg->dll_indices[0])
+                if (cfg->dll_indices[1] == cfg->dll_indices[0])       /* nudge to avoid stomp collision */
                     cfg->dll_indices[1] = (cfg->dll_indices[1] + 1) % 10;
                 cfg->dll_indices[2] = rnd[2] % 10;
                 if (cfg->dll_indices[2] == cfg->dll_indices[0] || cfg->dll_indices[2] == cfg->dll_indices[1])
                     cfg->dll_indices[2] = (cfg->dll_indices[2] + 1) % 10;
                 if (cfg->dll_indices[2] == cfg->dll_indices[0] || cfg->dll_indices[2] == cfg->dll_indices[1])
-                    cfg->dll_indices[2] = (cfg->dll_indices[2] + 1) % 10;
+                    cfg->dll_indices[2] = (cfg->dll_indices[2] + 1) % 10; /* two bumps guarantee uniqueness for 3 out of 10 */
             } else {
                 printf("[!] Unknown preset: %s  (valid: PRINT, MEDIA, NETWORK, RANDOM)\n", preset);
                 return FALSE;
