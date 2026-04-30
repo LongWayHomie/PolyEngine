@@ -221,7 +221,13 @@ static BOOL ParseArgs(int argc, char* argv[], BUILD_CONFIG* cfg) {
                 }
                 cfg->dll_indices[0] = rnd[0] % 10;
                 cfg->dll_indices[1] = rnd[1] % 10;
+                if (cfg->dll_indices[1] == cfg->dll_indices[0])
+                    cfg->dll_indices[1] = (cfg->dll_indices[1] + 1) % 10;
                 cfg->dll_indices[2] = rnd[2] % 10;
+                if (cfg->dll_indices[2] == cfg->dll_indices[0] || cfg->dll_indices[2] == cfg->dll_indices[1])
+                    cfg->dll_indices[2] = (cfg->dll_indices[2] + 1) % 10;
+                if (cfg->dll_indices[2] == cfg->dll_indices[0] || cfg->dll_indices[2] == cfg->dll_indices[1])
+                    cfg->dll_indices[2] = (cfg->dll_indices[2] + 1) % 10;
             } else {
                 printf("[!] Unknown preset: %s  (valid: PRINT, MEDIA, NETWORK, RANDOM)\n", preset);
                 return FALSE;
@@ -263,7 +269,7 @@ static BOOL ParseArgs(int argc, char* argv[], BUILD_CONFIG* cfg) {
             cfg->opsecFlags |= OPSEC_FLAG_KEEP_ALIVE;
         }
         else if (_stricmp(argv[i], "--unhook") == 0) {
-            cfg->opsecFlags |= EVASION_FLAG_UNHOOK;
+            cfg->opsecFlags |= OPSEC_FLAG_UNHOOK;
         }
         else if (_stricmp(argv[i], "--disable") == 0 && i + 1 < argc) {
             if (!ApplyDisableList(argv[++i], &cfg->opsecFlags)) return FALSE;

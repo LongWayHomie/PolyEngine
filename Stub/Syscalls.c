@@ -17,16 +17,15 @@ static PVOID g_CleanTrampoline = NULL;
 
 // Helper to sort syscall entries by RVA
 static void SortSyscalls() {
-    for (DWORD i = 0; i < g_SyscallCount - 1; i++) {
-        for (DWORD j = 0; j < g_SyscallCount - i - 1; j++) {
-            if (g_Syscalls[j].RVA > g_Syscalls[j + 1].RVA) {
-                SYSCALL_ENTRY temp = g_Syscalls[j];
-                g_Syscalls[j] = g_Syscalls[j + 1];
-                g_Syscalls[j + 1] = temp;
-            }
+    for (DWORD i = 1; i < g_SyscallCount; i++) {
+        SYSCALL_ENTRY key = g_Syscalls[i];
+        int j = (int)i - 1;
+        while (j >= 0 && g_Syscalls[j].RVA > key.RVA) {
+            g_Syscalls[j + 1] = g_Syscalls[j];
+            j--;
         }
+        g_Syscalls[j + 1] = key;
     }
-    // Assign SSNs sequentially based on sorted RVA
     for (DWORD i = 0; i < g_SyscallCount; i++) {
         g_Syscalls[i].SSN = i;
     }
@@ -89,16 +88,35 @@ static BOOL ParseNtdllSyscalls(PBYTE pBase) {
 static PVOID FindCleanTrampoline(PBYTE pBase) {
     PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pBase;
     PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pBase + pDos->e_lfanew);
-    PIMAGE_SECTION_HEADER pSection = IMAGE_FIRST_SECTION(pNt);
 
+    /* Load RUNTIME_FUNCTION table for RVA validation */
+    IMAGE_DATA_DIRECTORY pdataDir = pNt->OptionalHeader.DataDirectory[3]; /* IMAGE_DIRECTORY_ENTRY_EXCEPTION */
+    PRUNTIME_FUNCTION pRF = NULL;
+    DWORD rfCount = 0;
+    if (pdataDir.VirtualAddress && pdataDir.Size) {
+        pRF = (PRUNTIME_FUNCTION)(pBase + pdataDir.VirtualAddress);
+        rfCount = pdataDir.Size / sizeof(RUNTIME_FUNCTION);
+    }
+
+    PIMAGE_SECTION_HEADER pSection = IMAGE_FIRST_SECTION(pNt);
     for (int i = 0; i < pNt->FileHeader.NumberOfSections; i++) {
         if (custom_strcmp((char*)pSection[i].Name, ".text") == 0) {
             PBYTE pText = pBase + pSection[i].VirtualAddress;
             DWORD dwSize = pSection[i].Misc.VirtualSize;
 
-            for (DWORD j = 0; j < dwSize - 2; j++) {
+            for (DWORD j = 0; j + 2 < dwSize; j++) {
                 if (pText[j] == 0x0F && pText[j + 1] == 0x05 && pText[j + 2] == 0xC3) {
-                    return (PVOID)(pText + j);
+                    if (!pRF || rfCount == 0) return (PVOID)(pText + j);
+
+                    DWORD rva = (DWORD)((pText + j) - pBase);
+                    for (DWORD k = 0; k < rfCount; k++) {
+                        if (rva >= pRF[k].BeginAddress && rva < pRF[k].EndAddress) {
+                            if (!(pRF[k].UnwindData & 1))
+                                return (PVOID)(pText + j);
+                            break;
+                        }
+                    }
+                    /* Not inside a valid RUNTIME_FUNCTION — keep scanning */
                 }
             }
         }

@@ -99,7 +99,7 @@ static void UnhookModule(PVOID hookedBase, PVOID cleanBase) {
 }
 
 BOOL Unhook_RestoreAll(void) {
-    /* Mapuj czyste kopie */
+    /* Map clean copies from \KnownDlls\ */
     PVOID pCNtdll = MapKnownDll(kEncNtdll, 20, 0xAA);
     PVOID pCK32 = MapKnownDll(kEncKernel32, 23, 0xAA);
     PVOID pCKbase = MapKnownDll(kEncKernelbase, 25, 0xAA);

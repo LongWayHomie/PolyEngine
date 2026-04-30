@@ -24,7 +24,7 @@ constexpr int RandomCompileTimeSeed(void)
 
 // Compile-time seed generation for Djb2 hashing, ensuring variability across different compilations
 // Modulo 0xFF to ensure the seed fits within a byte, which is sufficient for our hashing needs
-constexpr auto DJB2_SEED = RandomCompileTimeSeed() % 0xFF;
+constexpr auto DJB2_SEED = (RandomCompileTimeSeed() % 0xFE) + 1;
 
 extern "C" constexpr DWORD HashStringDjb2A(const char* String) {
     DWORD Hash = DJB2_SEED;
