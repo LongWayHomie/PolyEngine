@@ -72,6 +72,14 @@ Evasion  (all ON by default):
     files       Recent-files count check (< 5 RecentDocs subkeys)
     all         Disable every token listed above
 
+Authenticode signing  (via mssign32!SignerSignEx2, no signtool dependency):
+  --pfx <path>               PFX certificate container to sign the output with
+  --pfx-pass <password>      PFX passphrase  [omit if PFX has no password]
+  --ts-url <url>             RFC 3161 timestamp URL  [default: no timestamping]
+                             OPSEC: timestamping reveals build IP/time to the TSA.
+                             Enable only when signing from an isolated VM, or when
+                             the signature must survive cert revocation.
+
 Examples:
   Builder.exe implant.exe     packed.exe
   Builder.exe shellcode.bin   packed.exe --keep-alive
@@ -80,6 +88,8 @@ Examples:
   Builder.exe implant.exe     packed.exe --preset NETWORK --disable etw,tls
   Builder.exe implant.exe     packed.exe --overload --hammer-s 5 --uptime-min 5
   Builder.exe implant.exe     packed.exe --exec-ctrl-name MyMutex --sleep-fwd-ms 1000
+  Builder.exe implant.exe     packed.exe --pfx cert.pfx --pfx-pass hunter2
+  Builder.exe implant.exe     packed.exe --pfx cert.pfx --ts-url http://timestamp.digicert.com
 ```
 
 ---
@@ -245,6 +255,34 @@ Builder.exe implant.exe packed.exe --disable peb,spoofing
 ```
 
 `--disable all` only covers sandbox/debug checks. OPSEC tokens (`etw`, `spoofing`, `peb`, `tls`) must be listed explicitly.
+
+</details>
+
+<details>
+<summary><b>Authenticode signing (PFX, no signtool)</b></summary>
+
+Sign the packed output with a PFX certificate. Builder talks to `mssign32!SignerSignEx2` directly — no `signtool.exe` on the operator workstation, no Windows SDK signing tool required:
+```
+Builder.exe implant.exe packed.exe --pfx cert.pfx --pfx-pass hunter2
+```
+
+PFX with no password (omit the `--pfx-pass` flag entirely):
+```
+Builder.exe implant.exe packed.exe --pfx cert.pfx
+```
+
+Add an RFC 3161 timestamp so the signature stays valid after the cert expires or is revoked. Note that the timestamp authority logs the build IP and the exact signing moment — see the OPSEC note below:
+```
+Builder.exe implant.exe packed.exe --pfx cert.pfx --pfx-pass hunter2 --ts-url http://timestamp.digicert.com
+Builder.exe implant.exe packed.exe --pfx cert.pfx --ts-url http://timestamp.sectigo.com
+Builder.exe implant.exe packed.exe --pfx cert.pfx --ts-url http://timestamp.globalsign.com/tsa/r6advanced1
+```
+
+**OPSEC — when to skip the timestamp:** `--ts-url` is opt-in. Each request to a public TSA puts the operator's build host into the TSA's HTTP logs alongside the exact second the signature was produced — a strong forensic correlation if the sample later surfaces in incident response. Embedding the timestamp also stamps that same moment into the signature blob inside the packed PE, where any later analyst can read it. When no timestamp is required (typical for self-signed certs or short-lived ops where signature validity beyond cert expiry doesn't matter), omit the flag and signing stays fully air-gappable.
+
+**OPSEC — when to keep the timestamp:** stolen or short-lived code-signing certs that will be revoked benefit from a TSA countersignature — Windows accepts the signature post-revocation as long as the timestamp predates the revocation entry. In that case, sign from an isolated VM through a proxy / Tor, and treat the TSA's logs as a deliberate (but contained) exposure.
+
+The private key is never persisted: `PFXImportCertStore` is called with `PKCS12_NO_PERSIST_KEY`, so no key container appears under `%APPDATA%\Microsoft\Crypto`. SHA-256 digest, CNG-preferred KSP for compatibility with PFXs produced by `New-SelfSignedCertificate` and OpenSSL ≥3.x.
 
 </details>
 
@@ -515,6 +553,17 @@ All Windows API names are replaced at compile time with precomputed Djb2 hashes 
 
 </details>
 
+<details>
+<summary><b>Authenticode signing — <code>--pfx</code></b></summary>
+
+Optional post-build step. When `--pfx` is supplied, Builder signs the packed output via `mssign32!SignerSignEx2` (resolved at runtime — no link-time `mssign32` dependency, no `signtool.exe` on the operator workstation). Signing runs as Phase 9 after `BuildInfectedPE` returns, because writing the signature rewrites `IMAGE_DIRECTORY_ENTRY_SECURITY` and recalculates the PE checksum; any later resource edit would invalidate the signature.
+
+The PFX is imported with `PKCS12_NO_PERSIST_KEY | PKCS12_PREFER_CNG_KSP | PKCS12_INCLUDE_EXTENDED_PROPERTIES`. `NO_PERSIST_KEY` keeps the private key resident in memory only — no key container file written under `%APPDATA%\Microsoft\Crypto`, which would otherwise tie the operator's workstation to the signed sample. `PREFER_CNG_KSP` is required for modern PFXs (PowerShell `New-SelfSignedCertificate`, OpenSSL ≥3.x); without it `SignerSignEx2` fails with `NTE_BAD_TYPE` (`0x8009000A`). Digest is SHA-256.
+
+`--ts-url` is opt-in. RFC 3161 timestamping sends an HTTP request to the timestamp authority, which logs the requester IP plus the signing moment, and embeds that moment into the signature blob inside the PE. Skip the flag for fully air-gappable signing; use it only when the signature must outlive the cert's lifetime (e.g. stolen / short-lived code-signing certs that will be revoked).
+
+</details>
+
 ---
 
 ## .rsrc Metadata Block Layout
@@ -587,7 +636,8 @@ Index 9 (`bcrypt.dll`) is reachable only via `--preset RANDOM`; the named preset
 ```
 PolyEngine/
 ├── Builder/
-│   └── Builder.cpp          — CLI parser, orchestration, CryptGenRandom salt/indices
+│   ├── Builder.cpp          — CLI parser, orchestration, CryptGenRandom salt/indices
+│   └── PeSigning.cpp/h      — optional Authenticode signing via mssign32!SignerSignEx2 (--pfx)
 ├── Engine/                  — shared between Builder and Stub (compiled into both)
 │   ├── Compression.c/h      — LZNT1 compress (Builder) / decompress (Stub) wrappers
 │   ├── Crypto.c/h           — CompoundEncrypt inner cipher (XOR+ROL+ADD+XOR)

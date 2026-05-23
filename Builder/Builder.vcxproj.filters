@@ -32,6 +32,9 @@
     <ClCompile Include="..\Engine\Xtea.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="PeSigning.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Engine\PeBuilder.h">
@@ -53,6 +56,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\Engine\OpsecFlags.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="PeSigning.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
