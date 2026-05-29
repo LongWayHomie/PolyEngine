@@ -175,6 +175,7 @@
     <ClCompile Include="..\Engine\MutationEngine.c" />
     <ClCompile Include="..\Engine\Xtea.c" />
     <ClCompile Include="Builder.cpp" />
+    <ClCompile Include="CloneMeta.cpp" />
     <ClCompile Include="PeSigning.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -185,6 +186,7 @@
     <ClInclude Include="..\Engine\NtApi.h" />
     <ClInclude Include="..\Engine\Xtea.h" />
     <ClInclude Include="..\Engine\OpsecFlags.h" />
+    <ClInclude Include="CloneMeta.h" />
     <ClInclude Include="PeSigning.h" />
   </ItemGroup>
   <ItemGroup>
