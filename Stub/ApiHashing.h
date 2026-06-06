@@ -62,6 +62,10 @@ extern DWORD g_Hash_advapi32;
 extern DWORD g_Hash_RegOpenKeyExA;
 extern DWORD g_Hash_RegQueryInfoKeyA;
 extern DWORD g_Hash_RegCloseKey;
+extern DWORD g_Hash_LoadLibraryW;
+extern DWORD g_Hash_CreateFileW;
+extern DWORD g_Hash_GetSystemDirectoryW;
+extern DWORD g_Hash_RtlUserThreadStart;
 
 #ifdef __cplusplus
 }

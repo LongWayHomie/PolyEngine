@@ -177,6 +177,10 @@ extern "C" {
     DWORD g_Hash_RegOpenKeyExA           = 0;
     DWORD g_Hash_RegQueryInfoKeyA        = 0;
     DWORD g_Hash_RegCloseKey             = 0;
+    DWORD g_Hash_LoadLibraryW            = 0;
+    DWORD g_Hash_CreateFileW             = 0;
+    DWORD g_Hash_GetSystemDirectoryW     = 0;
+    DWORD g_Hash_RtlUserThreadStart      = 0;
 } // extern "C"
 
 CTIME_HASHA(ZwCreateSection)           // ZwCreateSection_Rotr32A
@@ -213,6 +217,10 @@ CTIME_HASHA(GetSystemMetrics)          // GetSystemMetrics_Rotr32A
 CTIME_HASHA(RegOpenKeyExA)             // RegOpenKeyExA_Rotr32A
 CTIME_HASHA(RegQueryInfoKeyA)          // RegQueryInfoKeyA_Rotr32A
 CTIME_HASHA(RegCloseKey)               // RegCloseKey_Rotr32A
+CTIME_HASHA(LoadLibraryW)              // LoadLibraryW_Rotr32A
+CTIME_HASHA(CreateFileW)               // CreateFileW_Rotr32A
+CTIME_HASHA(GetSystemDirectoryW)       // GetSystemDirectoryW_Rotr32A
+CTIME_HASHA(RtlUserThreadStart)        // RtlUserThreadStart_Rotr32A
 void ApiHashing_InitHashes(void) {
     /* Module names use the wide-char hasher — must match GetModuleHandleH's
      * PEB LDR walk which hashes BaseDllName (a UNICODE_STRING). */
@@ -255,4 +263,8 @@ void ApiHashing_InitHashes(void) {
     g_Hash_RegOpenKeyExA           = RegOpenKeyExA_Rotr32A;
     g_Hash_RegQueryInfoKeyA        = RegQueryInfoKeyA_Rotr32A;
     g_Hash_RegCloseKey             = RegCloseKey_Rotr32A;
+    g_Hash_LoadLibraryW            = LoadLibraryW_Rotr32A;
+    g_Hash_CreateFileW             = CreateFileW_Rotr32A;
+    g_Hash_GetSystemDirectoryW     = GetSystemDirectoryW_Rotr32A;
+    g_Hash_RtlUserThreadStart      = RtlUserThreadStart_Rotr32A;
 }

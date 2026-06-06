@@ -89,7 +89,7 @@ static void UnhookModule(PVOID hookedBase, PVOID cleanBase) {
             SIZE_T sz = 0x1000;
             ULONG  old = 0;
             if (pNtProtectVirtualMemory((HANDLE)-1, &pBase, &sz,
-                PAGE_EXECUTE_READWRITE, &old) < 0) continue;
+                PAGE_READWRITE, &old) < 0) continue;
             custom_memcpy(pHPage, pCPage, pageBytes);
             pNtProtectVirtualMemory((HANDLE)-1, &pBase, &sz,
                 PAGE_EXECUTE_READ, &old);

