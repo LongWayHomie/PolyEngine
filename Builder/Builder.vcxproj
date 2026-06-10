@@ -177,6 +177,7 @@
     <ClCompile Include="Builder.cpp" />
     <ClCompile Include="CloneMeta.cpp" />
     <ClCompile Include="PeSigning.cpp" />
+    <ClCompile Include="UacManifest.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Engine\Crypto.h" />
@@ -188,6 +189,7 @@
     <ClInclude Include="..\Engine\OpsecFlags.h" />
     <ClInclude Include="CloneMeta.h" />
     <ClInclude Include="PeSigning.h" />
+    <ClInclude Include="UacManifest.h" />
   </ItemGroup>
   <ItemGroup>
     <MASM Include="..\Engine\DecryptorStub.asm" />

