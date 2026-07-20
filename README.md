@@ -663,7 +663,7 @@ The PFX is imported with `PKCS12_NO_PERSIST_KEY | PKCS12_PREFER_CNG_KSP | PKCS12
 
 ## .rsrc Metadata Block Layout
 
-Resource ID 101 (`RT_RCDATA`) contains the XTEA-encrypted blob followed by a **280-byte metadata block**. The Stub locates the block by scanning backwards from the end of the resource (up to 128 bytes, tolerating `UpdateResource` alignment padding) and verifying `magic == XOR(key_salt[0..3])`.
+A per-build `RT_RCDATA` integer ID (range `0x0100..0x7EFF`, chosen by `CryptGenRandom` at pack time) contains the XTEA-encrypted blob followed by a **280-byte metadata block**. Builder patches the ID into `g_PayloadResIdMarker` inside stub.bin before embedding; Stub reads the marker and opens that resource. The metadata block is located by scanning backwards from the end of the resource (up to 128 bytes, tolerating `UpdateResource` alignment padding) and verifying `magic == XOR(key_salt[0..3])`.
 
 <details>
 <summary>Field-by-field layout</summary>
@@ -678,7 +678,7 @@ Resource ID 101 (`RT_RCDATA`) contains the XTEA-encrypted blob followed by a **2
 [origSize        :  4 bytes]  original decompressed PE size (ULONG)
 [stubSize        :  4 bytes]  mutated ASM decryptor size (DWORD)
 [blobSize        :  4 bytes]  XTEA blob size (DWORD)
-[exportHash      :  4 bytes]  fixed-seed Djb2 hash of DLL export to invoke; 0 = none
+[exportHash      :  4 bytes]  Djb2(export, key_salt[0]); 0 = none
 [exportArg       : 128 bytes] null-terminated export argument string (zero-padded)
 [spoof_exe       :  64 bytes] ASCII filename for PEB spoof (zero-padded)
 [semaphore_name  :  32 bytes] exec-ctrl semaphore name; empty = default "wuauctl" (zero-padded)
@@ -691,7 +691,9 @@ Resource ID 101 (`RT_RCDATA`) contains the XTEA-encrypted blob followed by a **2
 Total: 280 bytes
 ```
 
-No fixed value exists anywhere in the block — every field is either random (key_salt, magic) or build-specific. YARA cannot anchor on a static byte sequence.
+No fixed value exists anywhere in the block — every field is either random (key_salt, magic) or build-specific. The RT_RCDATA ID itself is also per-build. YARA cannot anchor on a static byte sequence or a fixed resource ID.
+
+**Loader exit codes (Release):** all loader failure paths exit with code `0` via `LOADER_EXIT` (`Stub/Common.h`). Debug builds keep distinct codes for step diagnosis.
 
 </details>
 

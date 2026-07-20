@@ -669,7 +669,7 @@ int main(int argc, char* argv[]) {
           fprintf(stderr,
               "\n[!] WARNING: None of the preset DLLs has an executable section large\n"
               "             enough for the payload (%zu bytes).\n"
-              "             The packed exe will fail at runtime (exit code 33).\n"
+              "             The packed exe will fail at runtime (module-stomp alloc).\n"
               "             Try a different preset:  --preset MEDIA / NETWORK / RANDOM\n\n",
               mutated.totalSize);
 		  /* Warning only — we still proceed with the build, Stub will handle the failure gracefully. */

