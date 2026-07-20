@@ -92,6 +92,7 @@ Identity spoofing:
 
 Examples:
   Builder.exe implant.exe     packed.exe
+  Builder.exe implant.exe     packed.exe --stub stub_v2.bin
   Builder.exe shellcode.bin   packed.exe --keep-alive
   Builder.exe beacon.dll      packed.exe --export Start --keep-alive
   Builder.exe payload.dll     packed.exe --export Execute --arg "calc.exe"
@@ -402,12 +403,12 @@ Builder.exe implant.exe notepad.exe --clone-meta notepad.exe --pfx lab.pfx --pfx
 **Visual Studio 2022 (MSVC v143), Release|x64 only.** Open `PolyEngine.sln`.
 
 Build order matters:
-1. **Stub** project (Release|x64) → produces `x64/Release/stub_v0.bin` … `stub_v3.bin` (four `POLY_VARIANT` loaders)
-2. **Builder** project → produces `x64/Release/Builder.exe`
+1. **Stub** project (Release|x64) → MSBuild fan-out emits `x64/Release/stub_v0.bin` … `stub_v3.bin` (`POLY_VARIANT=0..3`)
+2. **Builder** project → produces `Builder/x64/Release/Builder.exe` (or solution OutDir)
 
-Each `stub_v*.bin` is a raw PE (linker entry point only) with a different OPSEC phase order. Builder picks one at random (or via `--stub`) and embeds the payload into its `.rsrc` section.
+Each `stub_v*.bin` is a PE with linker entry `EntryPoint` only (no CRT). Variants differ in OPSEC phase order and decoy/island layout; HellsHall/Moonwalk stay shared. Builder picks one at random from the CWD (or via `--stub`), runs StubMorph, then embeds the payload under a per-build RT_RCDATA ID.
 
-MASM custom build steps are configured in `Stub.vcxproj` (`HellsHall.asm`) and in the Engine projects (`DecryptorStub.asm`). No CMake, no Makefile.
+MASM: `Stub.vcxproj` → `HellsHall.asm`; Builder → `Engine/DecryptorStub.asm`. No CMake, no Makefile.
 
 **To add a new API hash:** compute `Djb2HashA("ApiName")` (same algorithm as in `ApiHashing.cpp`), add a `g_Hash_*` global in `ApiHashing.h`, initialize it in `ApiHashing_InitHashes()`.
 
@@ -422,34 +423,34 @@ Three components implementing a **pack → encrypt → inject** pipeline: **Buil
 
 ```
 Builder.exe
+  ├── picks loader stub (random stub_v0..v3.bin, or --stub <path>)
   ├── reads target PE or raw shellcode (.bin)
   ├── LZNT1 compress
   ├── CompoundEncrypt (inner cipher: XOR+ROL+ADD+XOR, per-build key)
   ├── MutationEngine → unique polymorphic ASM decryptor per build
   ├── CryptGenRandom → per-build XTEA key salt + DLL preset indices
   ├── XTEA-CTR encrypt (outer layer)
-  └── embed into chosen stub_v*.bin .rsrc → Output.exe
+  ├── BuildInfectedPE:
+  │     ├── patch TLS guard marker (--disable tls)
+  │     ├── patch g_PayloadResIdMarker → per-build RT_RCDATA ID
+  │     ├── StubMorph_Apply → timestamp, section names, island NOPs
+  │     ├── write stub → output PE
+  │     └── UpdateResource(RT_RCDATA, id) → [XTEA blob | 280-byte metadata]
+  ├── (optional) UAC manifest / clone-meta / Authenticode sign
+  └── Output.exe
 
-Output.exe (= loader stub variant + .rsrc payload)
-  ├── ApiHashing_InitHashes()          — resolve all APIs by Djb2 hash
-  ├── GetPayloadFromResource()         — parse .rsrc 280-byte metadata block
-  │                                      (before evasion: reads opsecFlags / EVASION_FLAG_NO_* bits)
-  ├── Evasion_HammerDelay()            — burn real wall-clock time via VirtualAlloc/Free loop
-  ├── Evasion_RunChecks()              — sandbox + debugger detection (8 checks, configurable)
-  ├── Syscalls_Init()                  — parse process ntdll exports, FreshyCalls SSN sort, locate `syscall;ret` in .text
-  ├── InitNtApi()                      — bind NT API pointers to HellsHall syscall wrappers
-  ├── Unhook_RestoreAll()              — (--unhook) overwrite EDR inline hooks with \KnownDlls\ clean bytes
-  ├── StackSpoof_Init()                — locate ntdll gadgets, build synthetic stack for RSP-pivot spoof
-  ├── Opsec_PatchEtw()                 — patch EtwEventWrite → xor eax,eax; ret (ETW bypass)
-  ├── Xtea_DeriveKey(key, salt)        — reconstruct per-build XTEA key
-  ├── Xtea_Crypt()                     — decrypt outer XTEA layer
-  ├── Opsec_SpoofPeb()                 — mask process name, path, cmdline, debug/heap flags in PEB
-  ├── ModuleStomp_Alloc()              — hijack .text section of benign DLL, save original bytes
-  │   or ModuleOverload_Alloc()        — (--overload) NtCreateSection+NtMapViewOfSection, not in PEB LDR
-  ├── copy decryptor stub → stomped .text (RW), flip RW→RX via HellsHall
-  ├── call decryptor (RCX = payload pointer in separate RW buffer) — no RWX ever
-  ├── flip stomped .text RX→RW, decompress LZNT1, wipe + restore original .text bytes → RX
-  └── RunPE() (PE payload) or NtProtect RW→RX + direct call (shellcode payload)
+Output.exe (= stub_v* variant + StubMorph + .rsrc payload)
+  ├── Loader_InitApis          — ApiHashing_InitHashes + resolve kernel32 APIs
+  ├── Loader_LoadPayload       — GetPayloadFromResource (280-byte metadata / opsecFlags)
+  ├── Loader_Evasion           — HammerDelay + RunChecks (Win32 only, before syscalls)
+  ├── Loader_InitSyscalls      — FreshyCalls SSN sort + InitNtApi (HellsHall bind)
+  ├── Loader_OpsecPhase        — order depends on POLY_VARIANT (0..3):
+  │     Unhook / StackSpoof_Init / PatchEtw / XTEA decrypt / SpoofPeb
+  │     (HellsHall.asm + g_Spoof* layout identical in every variant)
+  ├── Loader_DecryptExec       — ModuleStomp or ModuleOverload; decryptor RX call (RCX=payload);
+  │                               LZNT1 decompress; restore stomped .text
+  └── Loader_RunPayload        — StackSpoof_Cleanup then RunPE (PE) or RX+call (shellcode);
+                                  keep-alive: ExitThread (PE) or Sleep park (raw SC)
 ```
 
 </details>
@@ -457,6 +458,36 @@ Output.exe (= loader stub variant + .rsrc payload)
 ---
 
 ## Evasion Techniques
+
+<details>
+<summary><b>Loader variants — <code>stub_v0.bin</code>..<code>stub_v3.bin</code></b></summary>
+
+Stub Release|x64 builds **four** loaders via MSBuild (`POLY_VARIANT=0..3`, separate `IntDir`). Each binary has a different OPSEC phase order and per-variant decoy/island sizes (`PolyIslands.c`), so static hashes diverge. Shared and **never** variant-forked: `HellsHall.asm`, SilentMoonwalk data layout (`g_SpoofSyntheticStack`), TLS/ResID marker tags.
+
+| Variant | `Loader_OpsecPhase` order |
+|---|---|
+| V0 | Unhook → Spoof → ETW → XTEA → PEB |
+| V1 | Spoof → Unhook → XTEA → PEB → ETW |
+| V2 | Unhook → Spoof → PEB → XTEA → ETW |
+| V3 | Spoof → ETW → Unhook → XTEA → PEB |
+
+Builder with no `--stub` picks randomly among `stub_v0.bin`..`stub_v3.bin` in the CWD (`CryptGenRandom`). `--stub <path>` forces one file.
+
+</details>
+
+<details>
+<summary><b>Pack-time StubMorph</b></summary>
+
+After TLS/ResID marker patches and before writing the output PE, `StubMorph_Apply` (`Engine/StubMorph.c`) mutates the chosen loader image in-place:
+
+- random `TimeDateStamp`
+- random 8-char names for non-critical sections (skips `.rsrc`, `.reloc`, `.tls`, `.CRT`)
+- clear `IMAGE_DIRECTORY_ENTRY_DEBUG` + PE checksum (recomputed later if `--pfx`)
+- rewrite POLY island pads (`50 4C 59 A0` … `AF` markers in `PolyIslands.c`) with multi-byte NOPs of the **same length** — no PE growth, no reloc fixups
+
+Does not touch HellsHall, spoof globals, or marker tags used by TLS/ResID patching.
+
+</details>
 
 <details>
 <summary><b>Indirect Syscalls — HellsHall</b></summary>
@@ -663,7 +694,14 @@ The PFX is imported with `PKCS12_NO_PERSIST_KEY | PKCS12_PREFER_CNG_KSP | PKCS12
 
 ## .rsrc Metadata Block Layout
 
-A per-build `RT_RCDATA` integer ID (range `0x0100..0x7EFF`, chosen by `CryptGenRandom` at pack time) contains the XTEA-encrypted blob followed by a **280-byte metadata block**. Builder patches the ID into `g_PayloadResIdMarker` inside the chosen loader stub before embedding; Stub reads the marker and opens that resource. The metadata block is located by scanning backwards from the end of the resource (up to 128 bytes, tolerating `UpdateResource` alignment padding) and verifying `magic == XOR(key_salt[0..3])`.
+Resource payload is **not** fixed at ID 101. At pack time Builder:
+
+1. Draws a `WORD` RT_RCDATA ID via `CryptGenRandom` in range `0x0100..0x7EFF`
+2. Patches LE bytes at `g_PayloadResIdMarker[4..5]` in the loader stub (tag `{0xB1,0x0B,0x1D,0xE0}` in `Payload.c`; unpatched default = 101)
+3. Runs `StubMorph_Apply` on the stub image
+4. Writes `UpdateResource(RT_RCDATA, id)` = `[XTEA-encrypted blob | PAYLOAD_METADATA (280 bytes)]`
+
+At runtime Stub reads the marker and calls `FindResourceW` with that ID. The metadata block is located by scanning backwards from the end of the resource (up to 128 bytes, tolerating `UpdateResource` alignment padding) and verifying `magic == XOR(key_salt[0..3])`.
 
 <details>
 <summary>Field-by-field layout</summary>
@@ -678,22 +716,24 @@ A per-build `RT_RCDATA` integer ID (range `0x0100..0x7EFF`, chosen by `CryptGenR
 [origSize        :  4 bytes]  original decompressed PE size (ULONG)
 [stubSize        :  4 bytes]  mutated ASM decryptor size (DWORD)
 [blobSize        :  4 bytes]  XTEA blob size (DWORD)
-[exportHash      :  4 bytes]  Djb2(export, key_salt[0]); 0 = none
+[exportHash      :  4 bytes]  Djb2(exportName, key_salt[0]); 0 = none
 [exportArg       : 128 bytes] null-terminated export argument string (zero-padded)
 [spoof_exe       :  64 bytes] ASCII filename for PEB spoof (zero-padded)
 [semaphore_name  :  32 bytes] exec-ctrl semaphore name; empty = default "wuauctl" (zero-padded)
 [sleep_fwd_ms    :  4 bytes]  sleep-fwd check duration (ms); 0 = default 500
 [uptime_min      :  4 bytes]  uptime threshold (minutes); 0 = default 2
 [hammer_ms       :  4 bytes]  API-hammer delay (ms); 0 = default 3000
-[flags           :  4 bytes]  OPSEC_FLAG_* + EVASION_FLAG_* bitmask
+[flags           :  4 bytes]  OPSEC_FLAG_* + EVASION_FLAG_* + PAYLOAD_FLAG_* bitmask
 [magic           :  4 bytes]  key_salt[0]^key_salt[1]^key_salt[2]^key_salt[3]
 ──────────────────────────────
-Total: 280 bytes
+Total: 280 bytes  (kMagicOffset = 276)
 ```
 
-No fixed value exists anywhere in the block — every field is either random (key_salt, magic) or build-specific. The RT_RCDATA ID itself is also per-build. YARA cannot anchor on a static byte sequence or a fixed resource ID.
+`flags` bits (see `Engine/OpsecFlags.h`): OPSEC 0–5, evasion/unhook 6–16, `PAYLOAD_FLAG_IS_SHELLCODE` (17).
 
-**Loader exit codes (Release):** all loader failure paths exit with code `0` via `LOADER_EXIT` (`Stub/Common.h`). Debug builds keep distinct codes for step diagnosis.
+No fixed value exists anywhere in the block — every field is either random (key_salt, magic) or build-specific. The RT_RCDATA ID is also per-build. YARA cannot anchor on a static byte sequence or a fixed resource ID.
+
+**Loader exit codes (Release):** all loader failure paths exit with code `0` via `LOADER_EXIT` (`Stub/Common.h`). Debug builds keep distinct codes for step diagnosis. Evasion detections already exit 0.
 
 </details>
 
@@ -732,35 +772,38 @@ Index 9 (`bcrypt.dll`) is reachable only via `--preset RANDOM`; the named preset
 
 ```
 PolyEngine/
-├── Builder/
-│   ├── Builder.cpp          — CLI parser, orchestration, CryptGenRandom salt/indices
-│   ├── CloneMeta.cpp/h      — PE identity cloning: VERSIONINFO + icon + cert directory (--clone-meta)
-│   ├── PeSigning.cpp/h      — optional Authenticode signing via mssign32!SignerSignEx2 (--pfx)
-│   └── UacManifest.cpp/h    — UAC elevation manifest embedding: RT_MANIFEST/requireAdministrator (--uac)
-├── Engine/                  — shared between Builder and Stub (compiled into both)
-│   ├── Compression.c/h      — LZNT1 compress (Builder) / decompress (Stub) wrappers
+├── Builder/                 — packer CLI (links selected Engine units)
+│   ├── Builder.cpp          — CLI, ResolveStubPath (stub_v* pool), pipeline orchestration
+│   ├── CloneMeta.cpp/h      — VERSIONINFO + icon + cert directory (--clone-meta)
+│   ├── PeSigning.cpp/h      — Authenticode via mssign32!SignerSignEx2 (--pfx)
+│   └── UacManifest.cpp/h    — RT_MANIFEST requireAdministrator (--uac)
+├── Engine/                  — shared sources (subset linked into Builder and/or Stub)
+│   ├── Compression.c/h      — LZNT1 compress (Builder) / decompress helpers
 │   ├── Crypto.c/h           — CompoundEncrypt inner cipher (XOR+ROL+ADD+XOR)
-│   ├── MutationEngine.c/h   — polymorphic ASM decryptor generator
-│   ├── NtApi.c/h            — NT API pointer table definitions
-│   ├── OpsecFlags.h         — OPSEC_FLAG_* + EVASION_FLAG_* + PAYLOAD_FLAG_* bitmask definitions
-│   ├── PeBuilder.c/h        — PAYLOAD_METADATA struct + .rsrc injection (BeginUpdateResource)
-│   ├── RunPE.c/h            — in-process PE mapping (IAT fix, relocs, DllMain / EXE EP)
-│   └── Xtea.c/h             — XTEA-CTR block cipher + irrational-constant key derivation
-└── Stub/                    — CRT-free runtime executor
-    ├── Stub.cpp             — EntryPoint, orchestrates all stages
+│   ├── DecryptorStub.asm    — 34-byte polymorphic decryptor template
+│   ├── MutationEngine.c/h   — per-build ASM decryptor mutation (Builder)
+│   ├── NtApi.c/h            — NT API pointer table (Stub binds via HellsHall)
+│   ├── OpsecFlags.h         — OPSEC_FLAG_* + EVASION_FLAG_* + PAYLOAD_FLAG_* bits
+│   ├── PeBuilder.c/h        — PAYLOAD_METADATA (280 B) + .rsrc inject + marker patches
+│   ├── StubMorph.c/h        — pack-time PE morph + POLY island NOP rewrite (Builder only)
+│   ├── RunPE.c/h            — in-process PE map (IAT, relocs, DllMain / EXE EP)
+│   └── Xtea.c/h             — XTEA-CTR + irrational-constant key derivation
+└── Stub/                    — CRT-free runtime; Release|x64 → stub_v0.bin .. stub_v3.bin
+    ├── Stub.cpp             — EntryPoint → Loader_* phases; POLY_VARIANT OPSEC order
+    ├── PolyIslands.c        — marker-bracketed NOP pads + per-variant decoy blob
     ├── ApiHashing.cpp/h     — Djb2 hash cache, GetProcAddressH, GetModuleHandleH
-    ├── Common.c/h           — custom_memcpy/memset/memcmp (no CRT)
-    ├── Evasion.cpp/h        — sandbox + debugger detection (HammerDelay + RunChecks)
-    ├── HellsHall.asm        — indirect syscall dispatcher (SetSyscallParams + trampoline jump)
-    ├── ModuleStomping.c/h   — g_DllPool[10], ModuleStomp_Alloc, ModuleOverload_Alloc
-    ├── Opsec.c/h            — ETW patch, PEB spoofing
-    ├── Payload.c/h          — .rsrc parsing, GetPayloadFromResource, DecompressPayload
-    ├── StubNtApi.c          — SYSCALL_WRAPPER macro, Sys_Nt* wrappers, InitNtApi
-    ├── Structs.h            — NT struct definitions (no Windows DDK dependency)
-    ├── Syscalls.c/h         — process ntdll exports parse, RVA-order SSN derivation, `syscall;ret` site lookup in .text
-    ├── TlsCallback.c        — pre-EntryPoint anti-debug (PEB/heap flags, __fastfail)
-    ├── Unhooker.c/h         — (--unhook) page-by-page restore from \KnownDlls\ over EDR inline hooks
-    └── StackSpoof.c/h       — SilentMoonwalk RSP-pivot call stack spoofing
+    ├── Common.c/h           — custom_memcpy/memset/memcmp; LOADER_EXIT (Release→0)
+    ├── Evasion.cpp/h        — HammerDelay + RunChecks (sandbox / debugger)
+    ├── HellsHall.asm        — indirect syscall + Moonwalk RSP pivot (deny-list / shared)
+    ├── ModuleStomping.c/h   — ModuleStomp_Alloc / ModuleOverload_Alloc
+    ├── Opsec.c/h            — ETW patch, PEB spoof
+    ├── Payload.c/h          — g_PayloadResIdMarker, GetPayloadFromResource, decompress
+    ├── StubNtApi.c          — Sys_Nt* wrappers → HellsHall
+    ├── Structs.h            — NT structs (no DDK)
+    ├── Syscalls.c/h         — FreshyCalls SSN sort, syscall;ret trampoline in ntdll .text
+    ├── TlsCallback.c        — pre-EP anti-debug + TLS guard marker
+    ├── Unhooker.c/h         — optional \KnownDlls\ .text restore (--unhook)
+    └── StackSpoof.c/h       — gadget pool + per-call synthetic stack configs
 ```
 
 </details>
