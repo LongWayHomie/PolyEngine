@@ -171,6 +171,7 @@
     <ClCompile Include="..\Engine\Crypto.c" />
     <ClCompile Include="..\Engine\Compression.c" />
     <ClCompile Include="..\Engine\PeBuilder.c" />
+    <ClCompile Include="..\Engine\StubMorph.c" />
     <ClCompile Include="..\Engine\NtApi.c" />
     <ClCompile Include="..\Engine\MutationEngine.c" />
     <ClCompile Include="..\Engine\Xtea.c" />
@@ -183,6 +184,7 @@
     <ClInclude Include="..\Engine\Crypto.h" />
     <ClInclude Include="..\Engine\Compression.h" />
     <ClInclude Include="..\Engine\PeBuilder.h" />
+    <ClInclude Include="..\Engine\StubMorph.h" />
     <ClInclude Include="..\Engine\MutationEngine.h" />
     <ClInclude Include="..\Engine\NtApi.h" />
     <ClInclude Include="..\Engine\Xtea.h" />

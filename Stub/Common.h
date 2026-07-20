@@ -30,6 +30,15 @@ int custom_strcmp(const char* s1, const char* s2);
 void custom_srand(unsigned int seed);
 int custom_rand(void);
 
+/* Loader process exit code.
+ * Debug: preserve distinct codes for diagnosing failure steps.
+ * Release: always 0 — distinct exit codes are a behavioral fingerprint. */
+#if defined(_DEBUG)
+#define LOADER_EXIT(code) ((UINT)(code))
+#else
+#define LOADER_EXIT(code) ((UINT)0)
+#endif
+
 #ifdef __cplusplus
 }
 #endif

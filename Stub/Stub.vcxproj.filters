@@ -56,6 +56,9 @@
     <ClCompile Include="StackSpoof.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="PolyIslands.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Engine\Crypto.h">

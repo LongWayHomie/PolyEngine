@@ -14,9 +14,9 @@ This is a side project I've been working on for some time. I have used Claude Co
 
 ## Usage
 
-Build order: **Stub first, then Builder** (Builder embeds `stub.bin` into `.rsrc`).
+Build order: **Stub first, then Builder**. Stub Release|x64 emits `stub_v0.bin`..`stub_v3.bin`; Builder embeds one into `.rsrc`.
 
-Ensure `stub.bin` is in the same directory as `Builder.exe`.
+Ensure `stub_v0.bin`..`stub_v3.bin` are in the working directory (or pass `--stub`).
 
 ```
 Builder.exe <input> <output> [OPTIONS]
@@ -26,7 +26,7 @@ Builder.exe <input> <output> [OPTIONS]
   <output>  Output executable
 
 Loader:
-  --stub <path>              Path to stub.bin  [default: ./stub.bin]
+  --stub <path>              Loader stub PE  [default: random ./stub_v0.bin..stub_v3.bin]
   --preset PRINT|MEDIA|NETWORK|RANDOM
                              Module stomping DLL preset  [default: PRINT]
   --overload                 Module overloading instead of stomping
@@ -58,7 +58,7 @@ Evasion  (all ON by default):
     etw         EtwEventWrite patch (ETW telemetry suppression)
     spoofing    Call-stack spoofing (SilentMoonwalk RSP pivot)
     peb         PEB path/cmdline spoof
-    tls         TLS anti-debug callback (patches stub.bin before embedding)
+    tls         TLS anti-debug callback (patches loader stub before embedding)
 
   Sandbox/debug check tokens:
     hammer      API-hammer timing delay (VirtualAlloc/Free loop)
@@ -132,7 +132,7 @@ Builder.exe payload.dll packed.exe
 
 Use a stub from a non-default location:
 ```
-Builder.exe implant.exe packed.exe --stub C:\build\release\stub.bin
+Builder.exe implant.exe packed.exe --stub C:\build\release\stub_v1.bin
 ```
 
 </details>
@@ -402,10 +402,10 @@ Builder.exe implant.exe notepad.exe --clone-meta notepad.exe --pfx lab.pfx --pfx
 **Visual Studio 2022 (MSVC v143), Release|x64 only.** Open `PolyEngine.sln`.
 
 Build order matters:
-1. **Stub** project → produces `x64/Release/stub.bin` (raw binary, no PE headers)
+1. **Stub** project (Release|x64) → produces `x64/Release/stub_v0.bin` … `stub_v3.bin` (four `POLY_VARIANT` loaders)
 2. **Builder** project → produces `x64/Release/Builder.exe`
 
-`stub.bin` is a raw binary (linker entry point only). Builder reads it from disk and embeds it into the output `.rsrc` section.
+Each `stub_v*.bin` is a raw PE (linker entry point only) with a different OPSEC phase order. Builder picks one at random (or via `--stub`) and embeds the payload into its `.rsrc` section.
 
 MASM custom build steps are configured in `Stub.vcxproj` (`HellsHall.asm`) and in the Engine projects (`DecryptorStub.asm`). No CMake, no Makefile.
 
@@ -428,9 +428,9 @@ Builder.exe
   ├── MutationEngine → unique polymorphic ASM decryptor per build
   ├── CryptGenRandom → per-build XTEA key salt + DLL preset indices
   ├── XTEA-CTR encrypt (outer layer)
-  └── embed into stub.bin .rsrc → Output.exe
+  └── embed into chosen stub_v*.bin .rsrc → Output.exe
 
-Output.exe (= stub.bin + .rsrc payload)
+Output.exe (= loader stub variant + .rsrc payload)
   ├── ApiHashing_InitHashes()          — resolve all APIs by Djb2 hash
   ├── GetPayloadFromResource()         — parse .rsrc 280-byte metadata block
   │                                      (before evasion: reads opsecFlags / EVASION_FLAG_NO_* bits)
@@ -569,7 +569,7 @@ The Windows Loader invokes TLS callbacks from `.CRT$XLB` **before `AddressOfEntr
 
 On detection: `__fastfail(FAST_FAIL_FATAL_APP_EXIT)` — bypasses all user-mode exception handlers (VEH, SEH, UnhandledExceptionFilter). WER records `STATUS_STACK_BUFFER_OVERRUN (c0000409)`, indistinguishable from a legitimate memory-safety crash.
 
-Can be disabled at build time with `--disable tls`. Builder patches a 5-byte marker in `stub.bin` to neutralize the callback before embedding.
+Can be disabled at build time with `--disable tls`. Builder patches a 5-byte marker in the loader stub to neutralize the callback before embedding.
 
 </details>
 
@@ -663,7 +663,7 @@ The PFX is imported with `PKCS12_NO_PERSIST_KEY | PKCS12_PREFER_CNG_KSP | PKCS12
 
 ## .rsrc Metadata Block Layout
 
-A per-build `RT_RCDATA` integer ID (range `0x0100..0x7EFF`, chosen by `CryptGenRandom` at pack time) contains the XTEA-encrypted blob followed by a **280-byte metadata block**. Builder patches the ID into `g_PayloadResIdMarker` inside stub.bin before embedding; Stub reads the marker and opens that resource. The metadata block is located by scanning backwards from the end of the resource (up to 128 bytes, tolerating `UpdateResource` alignment padding) and verifying `magic == XOR(key_salt[0..3])`.
+A per-build `RT_RCDATA` integer ID (range `0x0100..0x7EFF`, chosen by `CryptGenRandom` at pack time) contains the XTEA-encrypted blob followed by a **280-byte metadata block**. Builder patches the ID into `g_PayloadResIdMarker` inside the chosen loader stub before embedding; Stub reads the marker and opens that resource. The metadata block is located by scanning backwards from the end of the resource (up to 128 bytes, tolerating `UpdateResource` alignment padding) and verifying `magic == XOR(key_salt[0..3])`.
 
 <details>
 <summary>Field-by-field layout</summary>
@@ -777,7 +777,7 @@ PolyEngine/
 
 **Maintained by: Razz** | Built for opsec-conscious security research and fun
 
-*Assistance in implementation done with Claude Code*
+*Assistance in implementation done with Claude Code, Grok and DeepSeek*
 
 ---
 

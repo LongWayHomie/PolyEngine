@@ -35,6 +35,15 @@
     <ClCompile Include="PeSigning.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="CloneMeta.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Engine\StubMorph.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UacManifest.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Engine\PeBuilder.h">
@@ -59,6 +68,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="PeSigning.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CloneMeta.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UacManifest.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Engine\StubMorph.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
