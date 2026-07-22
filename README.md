@@ -433,7 +433,7 @@ Builder.exe
   ├── BuildInfectedPE:
   │     ├── patch TLS guard marker (--disable tls)
   │     ├── patch g_PayloadResIdMarker → per-build RT_RCDATA ID
-  │     ├── StubMorph_Apply → timestamp, section names, island NOPs
+  │     ├── StubMorph_Apply → timestamp, section-name profile, island/tag randomize
   │     ├── write stub → output PE
   │     └── UpdateResource(RT_RCDATA, id) → [XTEA blob | 280-byte metadata]
   ├── (optional) UAC manifest / clone-meta / Authenticode sign
@@ -480,10 +480,10 @@ Builder with no `--stub` picks randomly among `stub_v0.bin`..`stub_v3.bin` in th
 
 After TLS/ResID marker patches and before writing the output PE, `StubMorph_Apply` (`Engine/StubMorph.c`) mutates the chosen loader image in-place:
 
-- random `TimeDateStamp`
-- random 8-char names for non-critical sections (skips `.rsrc`, `.reloc`, `.tls`, `.CRT`)
+- plausible `TimeDateStamp` drawn from **[now−5y, now]** — a fully random DWORD can land in the future, which is a heuristic flag
+- toolchain-profile section names (MSVC / MinGW / Delphi / NSIS style, picked per build; skips `.rsrc`, `.reloc`, `.tls`, `.CRT`) — random 8-char names would trip UPX-style packer heuristics
 - clear `IMAGE_DIRECTORY_ENTRY_DEBUG` + PE checksum (recomputed later if `--pfx`)
-- rewrite POLY island pads (`50 4C 59 A0` … `AF` markers in `PolyIslands.c`) with multi-byte NOPs of the **same length** — no PE growth, no reloc fixups
+- rewrite POLY island pads (`50 4C 59 A0` … `AF` markers in `PolyIslands.c`, incl. the `g_PolyDecoy` island) with random bytes of the **same length**, then randomize the tag markers themselves — no `PLY` pattern or fixed decoy content survives into the output PE; no PE growth, no reloc fixups
 
 Does not touch HellsHall, spoof globals, or marker tags used by TLS/ResID patching.
 
@@ -785,7 +785,7 @@ PolyEngine/
 │   ├── NtApi.c/h            — NT API pointer table (Stub binds via HellsHall)
 │   ├── OpsecFlags.h         — OPSEC_FLAG_* + EVASION_FLAG_* + PAYLOAD_FLAG_* bits
 │   ├── PeBuilder.c/h        — PAYLOAD_METADATA (280 B) + .rsrc inject + marker patches
-│   ├── StubMorph.c/h        — pack-time PE morph + POLY island NOP rewrite (Builder only)
+│   ├── StubMorph.c/h        — pack-time PE morph: timestamp, section-name profiles, island+tag randomize (Builder only)
 │   ├── RunPE.c/h            — in-process PE map (IAT, relocs, DllMain / EXE EP)
 │   └── Xtea.c/h             — XTEA-CTR + irrational-constant key derivation
 └── Stub/                    — CRT-free runtime; Release|x64 → stub_v0.bin .. stub_v3.bin

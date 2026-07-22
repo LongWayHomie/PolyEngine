@@ -11,10 +11,15 @@ extern "C" {
  * Pack-time safe morph of the loader stub PE (Builder only).
  *
  * Applies:
- *   1. Random TimeDateStamp
- *   2. Random 8-char names for non-critical sections (.rsrc/.reloc left alone)
+ *   1. Plausible TimeDateStamp drawn from [now-5y, now] — a fully random
+ *      DWORD can land in the future, which is a heuristic flag
+ *   2. Toolchain-profile section names (MSVC / MinGW / Delphi / NSIS style),
+ *      matched by original name; .rsrc/.reloc/.tls/.CRT left alone.
+ *      Random 8-char names would trip UPX-style packer heuristics
  *   3. Clear IMAGE_DIRECTORY_ENTRY_DEBUG if present
- *   4. In-place rewrite of POLY_ISLAND pad regions (NOP/junk, same length)
+ *   4. In-place random-byte rewrite of POLY island pads AND their tag
+ *      markers (same length) — no PLY pattern or fixed decoy content
+ *      survives into the output PE
  *
  * Never touches: PE structure integrity, entry point RVA, TLS directory
  * contents (except section name cosmetics), HellsHall body, marker tags
