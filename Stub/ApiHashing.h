@@ -66,6 +66,13 @@ extern DWORD g_Hash_LoadLibraryW;
 extern DWORD g_Hash_CreateFileW;
 extern DWORD g_Hash_GetSystemDirectoryW;
 extern DWORD g_Hash_RtlUserThreadStart;
+extern DWORD g_Hash_RtlAddFunctionTable;
+extern DWORD g_Hash_AllocConsole;
+extern DWORD g_Hash_GetConsoleWindow;
+extern DWORD g_Hash_ShowWindow;
+extern DWORD g_Hash_amsi;
+extern DWORD g_Hash_AmsiScanBuffer;
+extern DWORD g_Hash_SetProcessMitigationPolicy;
 
 #ifdef __cplusplus
 }

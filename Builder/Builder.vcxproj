@@ -170,6 +170,8 @@
   <ItemGroup>
     <ClCompile Include="..\Engine\Crypto.c" />
     <ClCompile Include="..\Engine\Compression.c" />
+    <ClCompile Include="..\Engine\DecoyImports.c" />
+    <ClCompile Include="..\Engine\EntropyCodec.c" />
     <ClCompile Include="..\Engine\PeBuilder.c" />
     <ClCompile Include="..\Engine\StubMorph.c" />
     <ClCompile Include="..\Engine\NtApi.c" />
@@ -183,6 +185,8 @@
   <ItemGroup>
     <ClInclude Include="..\Engine\Crypto.h" />
     <ClInclude Include="..\Engine\Compression.h" />
+    <ClInclude Include="..\Engine\DecoyImports.h" />
+    <ClInclude Include="..\Engine\EntropyCodec.h" />
     <ClInclude Include="..\Engine\PeBuilder.h" />
     <ClInclude Include="..\Engine\StubMorph.h" />
     <ClInclude Include="..\Engine\MutationEngine.h" />

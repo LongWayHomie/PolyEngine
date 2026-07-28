@@ -21,6 +21,10 @@ extern "C" {
  *   103  EndUpdateResource failed */
 int EmbedUacManifest(const char* targetPath);
 
+/* Embed a requestedExecutionLevel="asInvoker" manifest — the default for every
+ * build without --uac.  Same pipeline position and error codes as above. */
+int EmbedDefaultManifest(const char* targetPath);
+
 #ifdef __cplusplus
 }
 #endif

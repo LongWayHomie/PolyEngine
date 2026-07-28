@@ -56,6 +56,11 @@ Evasion  (all ON by default):
 
   OPSEC tokens:
     etw         EtwEventWrite patch (ETW telemetry suppression)
+    amsi        AmsiScanBuffer patch (applied only when amsi.dll is already
+                mapped in the process - never loads it)
+    blockdlls   ProcessSignaturePolicy MicrosoftSignedOnly (blocks non-MS-signed
+                DLL loads process-wide; payloads that LoadLibrary unsigned DLLs
+                need this disabled)
     spoofing    Call-stack spoofing (SilentMoonwalk RSP pivot)
     peb         PEB path/cmdline spoof
     tls         TLS anti-debug callback (patches loader stub before embedding)
@@ -87,8 +92,11 @@ Identity spoofing:
                              Name output to match donor OriginalFilename field.
                              When combined with --pfx: real signature overwrites cloned cert.
   --uac                      Embed a UAC elevation manifest (requireAdministrator).
-                             Output PE prompts for admin privileges on launch.
-                             Applied as Phase 10.5 (after packing, before signing).
+                              Output PE prompts for admin privileges on launch.
+                              Applied as Phase 10.5 (after packing, before signing).
+                              Without --uac every build gets a default asInvoker
+                              manifest - a total absence of RT_MANIFEST is itself
+                              a static anomaly.
 
 Examples:
   Builder.exe implant.exe     packed.exe
@@ -269,7 +277,7 @@ Builder.exe implant.exe packed.exe --disable etw
 Builder.exe implant.exe packed.exe --disable peb,spoofing
 ```
 
-`--disable all` only covers sandbox/debug checks. OPSEC tokens (`etw`, `spoofing`, `peb`, `tls`) must be listed explicitly.
+`--disable all` ORs **every** token (OPSEC + sandbox/debug checks) and sets the `EVASION_FLAG_NO_ALL` fast-exit shortcut. To keep OPSEC features on while skipping only the checks, list the check tokens explicitly instead of `all`.
 
 </details>
 
@@ -430,22 +438,28 @@ Builder.exe
   ├── MutationEngine → unique polymorphic ASM decryptor per build
   ├── CryptGenRandom → per-build XTEA key salt + DLL preset indices
   ├── XTEA-CTR encrypt (outer layer)
+  ├── EntropyEncode (Phase 8.5) — nibble→text shaping, 2x size, ~4.0 bits/byte
   ├── BuildInfectedPE:
   │     ├── patch TLS guard marker (--disable tls)
   │     ├── patch g_PayloadResIdMarker → per-build RT_RCDATA ID
-  │     ├── StubMorph_Apply → timestamp, section-name profile, island/tag randomize
+  │     ├── StubMorph_Apply → timestamp, section-name profile, Rich strip, island/tag randomize
   │     ├── write stub → output PE
-  │     └── UpdateResource(RT_RCDATA, id) → [XTEA blob | 280-byte metadata]
-  ├── (optional) UAC manifest / clone-meta / Authenticode sign
+  │     └── UpdateResource(RT_RCDATA, id) → [encoded blob (blobSize*2) | 280-byte metadata]
+  ├── manifest (always: asInvoker or requireAdministrator with --uac)
+  ├── (optional) clone-meta
+  ├── DecoyImports (Phase 11.5) — synthetic .idata, benign kernel32 imports
+  ├── (optional) Authenticode sign
+  ├── final PE checksum write (always)
   └── Output.exe
 
 Output.exe (= stub_v* variant + StubMorph + .rsrc payload)
   ├── Loader_InitApis          — ApiHashing_InitHashes + resolve kernel32 APIs
-  ├── Loader_LoadPayload       — GetPayloadFromResource (280-byte metadata / opsecFlags)
+  ├── Loader_LoadPayload       — GetPayloadFromResource (EntropyDecode + 280-byte metadata / opsecFlags)
+  ├── Loader_BlockDlls         — SetProcessMitigationPolicy(SignaturePolicy, MS-only) from kernelbase
   ├── Loader_Evasion           — HammerDelay + RunChecks (Win32 only, before syscalls)
   ├── Loader_InitSyscalls      — FreshyCalls SSN sort + InitNtApi (HellsHall bind)
   ├── Loader_OpsecPhase        — order depends on POLY_VARIANT (0..3):
-  │     Unhook / StackSpoof_Init / PatchEtw / XTEA decrypt / SpoofPeb
+  │     Unhook / StackSpoof_Init / PatchEtw / PatchAmsi / XTEA decrypt / SpoofPeb
   │     (HellsHall.asm + g_Spoof* layout identical in every variant)
   ├── Loader_DecryptExec       — ModuleStomp or ModuleOverload; decryptor RX call (RCX=payload);
   │                               LZNT1 decompress; restore stomped .text
@@ -466,10 +480,10 @@ Stub Release|x64 builds **four** loaders via MSBuild (`POLY_VARIANT=0..3`, separ
 
 | Variant | `Loader_OpsecPhase` order |
 |---|---|
-| V0 | Unhook → Spoof → ETW → XTEA → PEB |
-| V1 | Spoof → Unhook → XTEA → PEB → ETW |
-| V2 | Unhook → Spoof → PEB → XTEA → ETW |
-| V3 | Spoof → ETW → Unhook → XTEA → PEB |
+| V0 | Unhook → Spoof → ETW → AMSI → XTEA → PEB |
+| V1 | Spoof → Unhook → XTEA → PEB → ETW → AMSI |
+| V2 | Unhook → Spoof → PEB → XTEA → ETW → AMSI |
+| V3 | Spoof → ETW → AMSI → Unhook → XTEA → PEB |
 
 Builder with no `--stub` picks randomly among `stub_v0.bin`..`stub_v3.bin` in the CWD (`CryptGenRandom`). `--stub <path>` forces one file.
 
@@ -482,7 +496,8 @@ After TLS/ResID marker patches and before writing the output PE, `StubMorph_Appl
 
 - plausible `TimeDateStamp` drawn from **[now−5y, now]** — a fully random DWORD can land in the future, which is a heuristic flag
 - toolchain-profile section names (MSVC / MinGW / Delphi / NSIS style, picked per build; skips `.rsrc`, `.reloc`, `.tls`, `.CRT`) — random 8-char names would trip UPX-style packer heuristics
-- clear `IMAGE_DIRECTORY_ENTRY_DEBUG` + PE checksum (recomputed later if `--pfx`)
+- **Rich header strip** when a non-MSVC profile is drawn (`DanS`..`Rich`+key zeroed — a Microsoft toolchain signature would contradict the rename story; MSVC profile keeps it for coherence)
+- clear `IMAGE_DIRECTORY_ENTRY_DEBUG` + PE checksum (a real checksum is written back at the final Step 13 on every build)
 - rewrite POLY island pads (`50 4C 59 A0` … `AF` markers in `PolyIslands.c`, incl. the `g_PolyDecoy` island) with random bytes of the **same length**, then randomize the tag markers themselves — no `PLY` pattern or fixed decoy content survives into the output PE; no PE growth, no reloc fixups
 
 Does not touch HellsHall, spoof globals, or marker tags used by TLS/ResID patching.
@@ -620,6 +635,59 @@ Applied through `NtProtectVirtualMemory` (via HellsHall + Moonwalk RSP pivot). A
 </details>
 
 <details>
+<summary><b>AMSI Patching</b></summary>
+
+`Opsec_PatchAmsi()` writes a 6-byte stub over `AmsiScanBuffer` in the in-process `amsi.dll`:
+
+```asm
+; After patch:
+B8 57 00 07 80   mov eax, 0x80070057   ; E_INVALIDARG
+C3               ret
+```
+
+Callers treat `E_INVALIDARG` as "bad input", not "malicious" — no alert path fires. Applied through the same HellsHall NtProtect RX→RW→RX pattern as the ETW patch, immediately after it in every `POLY_VARIANT` order.
+
+**Patch only if already mapped:** `amsi.dll` is loaded into the process by AV/Defender before `EntryPoint` runs. If it is *not* present, the patch is skipped entirely — the loader never calls `LoadLibrary("amsi.dll")`, because an on-demand load would leave a fresh, timestamped IOC in the PEB LDR list. Soft-fail: a failed patch never kills payload delivery. Disable with `--disable amsi`.
+
+</details>
+
+<details>
+<summary><b>Block non-Microsoft DLLs — blockdlls</b></summary>
+
+Right after payload extraction (before evasion checks), `Loader_BlockDlls()` sets `SetProcessMitigationPolicy(ProcessSignaturePolicy, MicrosoftSignedOnly)`. From that point the OS refuses to load any DLL that is not Microsoft-signed **into the loader process** — EDR userland agents injected via `LoadLibrary` (in-process scanners, hooking DLLs) are turned away. The policy is one-way and survives for the process lifetime; it covers both the module-stomp DLLs (all System32, MS-signed) and anything the payload later loads.
+
+Two implementation notes:
+- The API is resolved from **kernelbase.dll**, never kernel32 — kernel32 exposes `SetProcessMitigationPolicy` only as a *forwarder string* (`api-ms-win-core-...`), so a naive export walk returns a pointer to ASCII text (crash at call time).
+- `DynamicCodePolicy` is deliberately **not** set — it would kill the loader's own module-stomping writes.
+
+**Tradeoff:** payloads that `LoadLibrary` non-Microsoft-signed DLLs (custom plugin DLLs dropped next to the output, third-party dependencies) will fail those loads. Disable with `--disable blockdlls` for such payloads. `Get-ProcessMitigation` does not display runtime-set signature policy (cmdlet blind spot) — verify via the API return value or by attempting an unsigned `LoadLibrary`.
+
+</details>
+
+<details>
+<summary><b>Entropy shaping — nibble-to-text payload resource</b></summary>
+
+A raw XTEA blob sits at ~7.99 bits/byte — the classic *high-entropy resource* heuristic that static scanners flag instantly. `Engine/EntropyCodec.c` maps every byte to **two characters from a 16-letter high-frequency ASCII alphabet** (`etaoinshrdlcumwf`) between the XTEA pass (Builder Phase 8.5) and the `.rsrc` write:
+
+- `.rsrc` payload entropy drops from ~7.8 to **~4.0 bits/byte**, visually and statistically indistinguishable from text/config data
+- cost: 2x resource size
+- `metadata.blobSize` keeps the **decoded** size; the resource physically holds `blobSize*2` encoded bytes immediately before the metadata block
+- Stub decodes in `GetPayloadFromResource` (`EntropyDecode`, 256-byte reverse table on stack) into the same RW buffer XTEA then decrypts in place — no extra allocation, no crypto change
+
+</details>
+
+<details>
+<summary><b>Decoy import directory — synthetic .idata</b></summary>
+
+The CRT-free stub has an **empty import directory** — and a GUI-subsystem exe with zero imports is as much of a packer tell as a suspicious one. (`RtlAddFunctionTable`, `AllocConsole`, `GetConsoleWindow`, `ShowWindow` are all lazy-resolved via `GetProcAddressH` at their RunPE call sites, so the old "console-hider trio + SEH registration" import set is gone.)
+
+`Engine/DecoyImports.c` (Builder Phase 11.5) appends a synthetic `.idata` section to the packed output: one `kernel32.dll` descriptor with **5-8 randomly picked innocuous exports** (partial Fisher-Yates over a 12-name pool: `GetTickCount64`, `QueryPerformanceCounter`, `GetSystemTimeAsFileTime`, ...), INT+IAT thunk arrays, and `NumberOfSections` / `SizeOfImage` / `DataDirectory[IMPORT]` / `[IAT]` updates. The result looks like a minimal MSVC GUI binary's import table. The decoys are never called; the loader fills the IAT with real addresses at load time as usual.
+
+**Pipeline position matters:** Phase 11.5 runs *after* the last `BeginUpdateResource`/`EndUpdateResource` cycle (Phases 10/10.5/11) because `UpdateResource` relocates sections on `.rsrc` growth and fixes up only the RESOURCE and BASERELOC directories — an import directory planted earlier ends up with a stale RVA. It runs *before* signing (Phase 12) so the signature covers it, and is skipped when a cert table already exists (`--clone-meta` path — appending past `WIN_CERTIFICATE` would invalidate the cloned cert).
+
+</details>
+
+<details>
 <summary><b>PEB Spoofing</b></summary>
 
 `Opsec_SpoofPeb()` rewrites:
@@ -666,6 +734,8 @@ The spoof filename is set via `--spoof-name`. If omitted, Builder picks randomly
 
 All Windows API names are replaced at compile time with precomputed Djb2 hashes stored as `g_Hash_*` globals. `GetProcAddressH()` walks the export directory and hashes each exported name until a match is found — no plaintext API string appears in the import table or `.data`.
 
+**Forwarded exports:** on Win10/11 many kernel32 exports are forwarders (`InitializeCriticalSection` → `NTDLL.RtlInitializeCriticalSection`, `ExitThread` → `NTDLL.RtlExitUserThread`) — their EAT entries point at `MODULE.Function` ASCII strings inside the export directory, not code. Both `GetProcAddressH` and RunPE's `RunPE_GetExport` detect forwarder RVAs (inside the export directory range) and follow them to the target module's EAT, so payloads (e.g. MinGW CRT init calling `EnterCriticalSection`) never end up executing a string as code.
+
 </details>
 
 <details>
@@ -699,7 +769,7 @@ Resource payload is **not** fixed at ID 101. At pack time Builder:
 1. Draws a `WORD` RT_RCDATA ID via `CryptGenRandom` in range `0x0100..0x7EFF`
 2. Patches LE bytes at `g_PayloadResIdMarker[4..5]` in the loader stub (tag `{0xB1,0x0B,0x1D,0xE0}` in `Payload.c`; unpatched default = 101)
 3. Runs `StubMorph_Apply` on the stub image
-4. Writes `UpdateResource(RT_RCDATA, id)` = `[XTEA-encrypted blob | PAYLOAD_METADATA (280 bytes)]`
+4. Writes `UpdateResource(RT_RCDATA, id)` = `[EntropyCodec-shaped XTEA blob (blobSize*2 bytes) | PAYLOAD_METADATA (280 bytes)]`
 
 At runtime Stub reads the marker and calls `FindResourceW` with that ID. The metadata block is located by scanning backwards from the end of the resource (up to 128 bytes, tolerating `UpdateResource` alignment padding) and verifying `magic == XOR(key_salt[0..3])`.
 
@@ -707,7 +777,7 @@ At runtime Stub reads the marker and calls `FindResourceW` with that ID. The met
 <summary>Field-by-field layout</summary>
 
 ```
-[XTEA-encrypted blob]
+[EntropyCodec-shaped XTEA blob — blobSize*2 bytes, ~4.0 bits/byte]
 [key_salt        : 16 bytes]  per-build random XTEA salt (4 x DWORD)
 [dll_idx0        :  1 byte ]  index into g_DllPool (module stomping target 1)
 [dll_idx1        :  1 byte ]  index into g_DllPool (module stomping target 2)
@@ -715,7 +785,7 @@ At runtime Stub reads the marker and calls `FindResourceW` with that ID. The met
 [pad             :  1 byte ]  alignment (0x00)
 [origSize        :  4 bytes]  original decompressed PE size (ULONG)
 [stubSize        :  4 bytes]  mutated ASM decryptor size (DWORD)
-[blobSize        :  4 bytes]  XTEA blob size (DWORD)
+[blobSize        :  4 bytes]  DECODED XTEA blob size (DWORD); resource holds blobSize*2 encoded bytes
 [exportHash      :  4 bytes]  Djb2(exportName, key_salt[0]); 0 = none
 [exportArg       : 128 bytes] null-terminated export argument string (zero-padded)
 [spoof_exe       :  64 bytes] ASCII filename for PEB spoof (zero-padded)
@@ -729,7 +799,7 @@ At runtime Stub reads the marker and calls `FindResourceW` with that ID. The met
 Total: 280 bytes  (kMagicOffset = 276)
 ```
 
-`flags` bits (see `Engine/OpsecFlags.h`): OPSEC 0–5, evasion/unhook 6–16, `PAYLOAD_FLAG_IS_SHELLCODE` (17).
+`flags` bits (see `Engine/OpsecFlags.h`): OPSEC 0–5, evasion/unhook 6–16, `PAYLOAD_FLAG_IS_SHELLCODE` (17), `OPSEC_FLAG_NO_AMSI` (18), `OPSEC_FLAG_NO_BLOCKDLLS` (19).
 
 No fixed value exists anywhere in the block — every field is either random (key_salt, magic) or build-specific. The RT_RCDATA ID is also per-build. YARA cannot anchor on a static byte sequence or a fixed resource ID.
 
@@ -776,17 +846,19 @@ PolyEngine/
 │   ├── Builder.cpp          — CLI, ResolveStubPath (stub_v* pool), pipeline orchestration
 │   ├── CloneMeta.cpp/h      — VERSIONINFO + icon + cert directory (--clone-meta)
 │   ├── PeSigning.cpp/h      — Authenticode via mssign32!SignerSignEx2 (--pfx)
-│   └── UacManifest.cpp/h    — RT_MANIFEST requireAdministrator (--uac)
+│   └── UacManifest.cpp/h    — RT_MANIFEST requireAdministrator (--uac) / default asInvoker
 ├── Engine/                  — shared sources (subset linked into Builder and/or Stub)
 │   ├── Compression.c/h      — LZNT1 compress (Builder) / decompress helpers
 │   ├── Crypto.c/h           — CompoundEncrypt inner cipher (XOR+ROL+ADD+XOR)
+│   ├── DecoyImports.c/h     — synthetic benign .idata for the packed output (Builder Phase 11.5)
 │   ├── DecryptorStub.asm    — 34-byte polymorphic decryptor template
+│   ├── EntropyCodec.c/h     — nibble→text entropy shaping of the .rsrc payload (Builder + Stub)
 │   ├── MutationEngine.c/h   — per-build ASM decryptor mutation (Builder)
 │   ├── NtApi.c/h            — NT API pointer table (Stub binds via HellsHall)
 │   ├── OpsecFlags.h         — OPSEC_FLAG_* + EVASION_FLAG_* + PAYLOAD_FLAG_* bits
 │   ├── PeBuilder.c/h        — PAYLOAD_METADATA (280 B) + .rsrc inject + marker patches
-│   ├── StubMorph.c/h        — pack-time PE morph: timestamp, section-name profiles, island+tag randomize (Builder only)
-│   ├── RunPE.c/h            — in-process PE map (IAT, relocs, DllMain / EXE EP)
+│   ├── StubMorph.c/h        — pack-time PE morph: timestamp, section-name profiles, Rich strip, island+tag randomize (Builder only)
+│   ├── RunPE.c/h            — in-process PE map (IAT incl. forwarded exports, relocs, DllMain / EXE EP)
 │   └── Xtea.c/h             — XTEA-CTR + irrational-constant key derivation
 └── Stub/                    — CRT-free runtime; Release|x64 → stub_v0.bin .. stub_v3.bin
     ├── Stub.cpp             — EntryPoint → Loader_* phases; POLY_VARIANT OPSEC order
@@ -796,7 +868,7 @@ PolyEngine/
     ├── Evasion.cpp/h        — HammerDelay + RunChecks (sandbox / debugger)
     ├── HellsHall.asm        — indirect syscall + Moonwalk RSP pivot (deny-list / shared)
     ├── ModuleStomping.c/h   — ModuleStomp_Alloc / ModuleOverload_Alloc
-    ├── Opsec.c/h            — ETW patch, PEB spoof
+    ├── Opsec.c/h            — ETW patch, AMSI patch, PEB spoof
     ├── Payload.c/h          — g_PayloadResIdMarker, GetPayloadFromResource, decompress
     ├── StubNtApi.c          — Sys_Nt* wrappers → HellsHall
     ├── Structs.h            — NT structs (no DDK)
@@ -820,7 +892,7 @@ PolyEngine/
 
 **Maintained by: Razz** | Built for opsec-conscious security research and fun
 
-*Assistance in implementation done with Claude Code, Grok and DeepSeek*
+*Assistance in implementation done with Claude Code and Kimi K3*
 
 ---
 

@@ -209,6 +209,7 @@
   <!-- ================================================================== -->
   <ItemGroup>
     <ClCompile Include="..\Engine\Crypto.c" />
+    <ClCompile Include="..\Engine\EntropyCodec.c" />
     <ClCompile Include="..\Engine\RunPE.c" />
     <ClCompile Include="..\Engine\Xtea.c" />
     <ClCompile Include="StackSpoof.c" />
@@ -228,6 +229,7 @@
   <ItemGroup>
     <ClInclude Include="..\Engine\Crypto.h" />
     <ClInclude Include="..\Engine\Compression.h" />
+    <ClInclude Include="..\Engine\EntropyCodec.h" />
     <ClInclude Include="..\Engine\RunPE.h" />
     <ClInclude Include="..\Engine\NtApi.h" />
     <ClInclude Include="..\Engine\Xtea.h" />

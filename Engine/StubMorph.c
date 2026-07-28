@@ -92,6 +92,28 @@ static int Morph_RenameSections(PIMAGE_SECTION_HEADER pSec, WORD nSec, int profi
     return nRenamed;
 }
 
+/* Rich header strip — the MSVC Rich block (DanS..Rich+key) ties the binary to
+ * a Microsoft toolchain, contradicting a drawn MinGW/Delphi/NSIS section
+ * profile.  Layout: [DanS^key][compid^key count^key]...["Rich"][key].
+ * Located by the ASCII "Rich" dword; DanS sits XORed with the key before it. */
+static int Morph_StripRich(BYTE* pPe, DWORD peSize, DWORD eLfanew) {
+    if (eLfanew < 0x40 || eLfanew > peSize) return 0;
+    const DWORD kRichSig = 0x68636952;  /* "Rich" LE */
+    const DWORD kDanSSig = 0x536E6144;  /* "DanS" LE */
+    for (DWORD i = 0x40; i + 8 <= eLfanew; i += 4) {
+        if (*(DWORD*)(pPe + i) != kRichSig) continue;
+        DWORD key   = *(DWORD*)(pPe + i + 4);
+        DWORD danSX = kDanSSig ^ key;
+        for (DWORD j = i - 4; j >= 0x40; j -= 4) {
+            if (*(DWORD*)(pPe + j) != danSX) continue;
+            memset(pPe + j, 0, (i + 8) - j);
+            return 1;
+        }
+        return 0;  /* Rich found but DanS missing — leave untouched */
+    }
+    return 0;
+}
+
 static int Morph_Islands(BYTE* p, DWORD size) {
     int nMorphed = 0;
     for (DWORD i = 0; i + 6 < size; i++) {
@@ -152,6 +174,10 @@ BOOL StubMorph_Apply(BYTE* pPe, DWORD peSize) {
     int profile = (int)(Morph_U32() % PROFILE_N);
     int nRenamed = Morph_RenameSections((PIMAGE_SECTION_HEADER)(pPe + secOff), nSec, profile);
 
+    /* Profile 0 keeps the MSVC story, Rich included; any other toolchain
+     * profile would contradict the Rich block, so strip it. */
+    int nRich = (profile != 0) ? Morph_StripRich(pPe, peSize, (DWORD)pDos->e_lfanew) : 0;
+
     IMAGE_DATA_DIRECTORY* pDbg =
         &pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
     if (pDbg->VirtualAddress && pDbg->Size) {
@@ -163,7 +189,7 @@ BOOL StubMorph_Apply(BYTE* pPe, DWORD peSize) {
 
     int nIsl = Morph_Islands(pPe, peSize);
 
-    printf("[+] StubMorph: TimeDateStamp=0x%08X  section_profile=%d  sections_renamed=%d  islands=%d\n",
-           ts, profile, nRenamed, nIsl);
+    printf("[+] StubMorph: TimeDateStamp=0x%08X  section_profile=%d  sections_renamed=%d  islands=%d  rich_stripped=%d\n",
+           ts, profile, nRenamed, nIsl, nRich);
     return TRUE;
 }

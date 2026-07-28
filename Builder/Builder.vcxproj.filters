@@ -20,6 +20,12 @@
     <ClCompile Include="..\Engine\Crypto.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\Engine\EntropyCodec.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Engine\DecoyImports.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\Engine\MutationEngine.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -59,6 +65,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\Engine\Compression.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Engine\EntropyCodec.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Engine\DecoyImports.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\Engine\Xtea.h">

