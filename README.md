@@ -418,6 +418,14 @@ Each `stub_v*.bin` is a PE with linker entry `EntryPoint` only (no CRT). Variant
 
 MASM: `Stub.vcxproj` → `HellsHall.asm`; Builder → `Engine/DecryptorStub.asm`. No CMake, no Makefile.
 
+The solution also builds **PolyEngine.GUI** (native Win32 + OpenGL3 + Dear ImGui, vendored in-tree) and its test runner. Both land in `x64/Release/` next to `Builder.exe` and `stub_v*.bin` — the GUI resolves Builder/stub paths from its own directory, so it works straight after the build with zero configuration. Run `x64/Release/PolyEngine.GUI.exe`; run `x64/Release/PolyEngine.GUI.Tests.exe` to execute the unit tests (38 tests, no external framework). GUI projects are x64-only and are skipped in Release|x86 solution builds.
+
+![GUI-1](images/gui_1.png)
+
+![GUI-2](images/gui_2.png)
+
+![GUI-3](images/gui_3.png)
+
 **To add a new API hash:** compute `Djb2HashA("ApiName")` (same algorithm as in `ApiHashing.cpp`), add a `g_Hash_*` global in `ApiHashing.h`, initialize it in `ApiHashing_InitHashes()`.
 
 ---
@@ -860,7 +868,7 @@ PolyEngine/
 │   ├── StubMorph.c/h        — pack-time PE morph: timestamp, section-name profiles, Rich strip, island+tag randomize (Builder only)
 │   ├── RunPE.c/h            — in-process PE map (IAT incl. forwarded exports, relocs, DllMain / EXE EP)
 │   └── Xtea.c/h             — XTEA-CTR + irrational-constant key derivation
-└── Stub/                    — CRT-free runtime; Release|x64 → stub_v0.bin .. stub_v3.bin
+├── Stub/                    — CRT-free runtime; Release|x64 → stub_v0.bin .. stub_v3.bin
     ├── Stub.cpp             — EntryPoint → Loader_* phases; POLY_VARIANT OPSEC order
     ├── PolyIslands.c        — marker-bracketed NOP pads + per-variant decoy blob
     ├── ApiHashing.cpp/h     — Djb2 hash cache, GetProcAddressH, GetModuleHandleH
@@ -876,6 +884,10 @@ PolyEngine/
     ├── TlsCallback.c        — pre-EP anti-debug + TLS guard marker
     ├── Unhooker.c/h         — optional \KnownDlls\ .text restore (--unhook)
     └── StackSpoof.c/h       — gadget pool + per-call synthetic stack configs
+└── GUI/                     — native dashboard over Builder.exe (Win32 + OpenGL3 + Dear ImGui, no deps)
+    ├── src/                 — app state, services (ArgBuilder/Runner/stores), screens, theme, JSON parser
+    ├── third_party/imgui/   — Dear ImGui sources (vendored)
+    └── tests/               — console unit-test runner (plain asserts, no framework)
 ```
 
 </details>

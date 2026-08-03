@@ -6,6 +6,10 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Builder", "Builder\Builder.
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Stub", "Stub\Stub.vcxproj", "{0062822B-B410-4D0A-9015-5D6FE73F1116}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PolyEngine.GUI", "GUI\PolyEngine.GUI.vcxproj", "{109A33FA-90AF-4694-8ADA-F08EC03E7321}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PolyEngine.GUI.Tests", "GUI\tests\PolyEngine.GUI.Tests.vcxproj", "{32034234-23E5-47D3-8679-EFCC9DF72692}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Release|x64 = Release|x64
@@ -20,6 +24,12 @@ Global
 		{0062822B-B410-4D0A-9015-5D6FE73F1116}.Release|x64.Build.0 = Release|x64
 		{0062822B-B410-4D0A-9015-5D6FE73F1116}.Release|x86.ActiveCfg = Release|Win32
 		{0062822B-B410-4D0A-9015-5D6FE73F1116}.Release|x86.Build.0 = Release|Win32
+		{109A33FA-90AF-4694-8ADA-F08EC03E7321}.Release|x64.ActiveCfg = Release|x64
+		{109A33FA-90AF-4694-8ADA-F08EC03E7321}.Release|x64.Build.0 = Release|x64
+		{109A33FA-90AF-4694-8ADA-F08EC03E7321}.Release|x86.ActiveCfg = Release|x64
+		{32034234-23E5-47D3-8679-EFCC9DF72692}.Release|x64.ActiveCfg = Release|x64
+		{32034234-23E5-47D3-8679-EFCC9DF72692}.Release|x64.Build.0 = Release|x64
+		{32034234-23E5-47D3-8679-EFCC9DF72692}.Release|x86.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
