@@ -92,7 +92,7 @@ static const std::map<std::string, std::string> kEn = {
     {"Validation.InputNotFound", "Input file does not exist."},
     {"Validation.InputInvalidExtension", "Input must be .exe, .dll or .bin."},
     {"Validation.OutputRequired", "Output path is required."},
-    {"Validation.InvalidPreset", "Preset must be PRINT, MEDIA, NETWORK or RANDOM."},
+    {"Validation.InvalidPreset", "Preset must be PRINT, MEDIA, NETWORK, WEB or RANDOM."},
     {"Validation.ExportNameTooLong", "Export name exceeds 63 characters."},
     {"Validation.ExportArgTooLong", "Export argument exceeds 127 characters."},
     {"Validation.SpoofNameTooLong", "Spoof name exceeds 63 characters."},

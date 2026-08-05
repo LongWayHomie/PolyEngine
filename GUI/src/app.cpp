@@ -7,7 +7,7 @@
 
 namespace peg {
 
-const std::vector<std::string> AppState::kPresetPool = {"PRINT", "MEDIA", "NETWORK", "RANDOM"};
+const std::vector<std::string> AppState::kPresetPool = {"PRINT", "MEDIA", "NETWORK", "WEB", "RANDOM"};
 const std::vector<std::string> AppState::kSpoofPool = {
     "RuntimeBroker.exe", "SgrmBroker.exe", "WmiPrvSE.exe", "SearchIndexer.exe",
     "taskhostw.exe", "spoolsv.exe", "wlrmdr.exe", "WMPDMC.exe", "hvix64.exe",

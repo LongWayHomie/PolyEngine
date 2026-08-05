@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/* 10-DLL pool shared between Builder and Stub.
+/* 11-DLL pool shared between Builder and Stub.
  * Builder picks 3 indices (via --preset or RANDOM) and stores them in .rsrc.
  * Stub decodes names at runtime via the internal DecodeDllName() helper
  * (XOR-encoded — no plaintext DLL names in .rdata).
@@ -24,6 +24,7 @@ extern "C" {
  *   7   | wtsapi32.dll      | NETWORK
  *   8   | wlanapi.dll       | NETWORK
  *   9   | bcrypt.dll        | CRYPTO
+ *  10   | mshtml.dll        | WEB    (~17 MB .text — fits payloads > 2.5 MB)
  */
 
 /*

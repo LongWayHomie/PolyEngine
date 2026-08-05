@@ -27,7 +27,7 @@ Builder.exe <input> <output> [OPTIONS]
 
 Loader:
   --stub <path>              Loader stub PE  [default: random ./stub_v0.bin..stub_v3.bin]
-  --preset PRINT|MEDIA|NETWORK|RANDOM
+  --preset PRINT|MEDIA|NETWORK|WEB|RANDOM
                              Module stomping DLL preset  [default: PRINT]
   --overload                 Module overloading instead of stomping
                              (NtCreateSection/NtMapViewOfSection, not in PEB LDR)
@@ -184,12 +184,14 @@ The decryptor stub is hidden inside the `.text` section of a benign Windows DLL.
 Builder.exe implant.exe packed.exe --preset PRINT
 Builder.exe implant.exe packed.exe --preset MEDIA
 Builder.exe implant.exe packed.exe --preset NETWORK
+Builder.exe implant.exe packed.exe --preset WEB
 Builder.exe implant.exe packed.exe --preset RANDOM
 ```
 
 `PRINT` (default) - `xpsservices.dll`, `msi.dll`, `dbghelp.dll`. Common across most workstations.
 `NETWORK` - `winhttp.dll`, `wtsapi32.dll`, `wlanapi.dll`. Fits a payload that already needs network APIs loaded.
-`RANDOM` - three random indices from the full pool (including `bcrypt.dll`, idx 9).
+`WEB` - `mshtml.dll` (idx 10, ~17 MB `.text`) with `msi.dll`/`dbghelp.dll` fallbacks. Required for payloads whose compressed blob exceeds the ~2.5 MB ceiling of indices 0-9 (e.g. Go-based implants such as Sliver).
+`RANDOM` - three random indices from indices 0-9 (including `bcrypt.dll`); `mshtml.dll` (idx 10) is reachable only via `--preset WEB`.
 
 Switch from `LoadLibraryW` stomping to `NtCreateSection`+`NtMapViewOfSection` overloading (DLL never enters `PEB.Ldr`):
 ```
@@ -836,8 +838,9 @@ Builder `--preset` selects 3 DLL indices stored in `.rsrc`. Stub resolves names 
 | 7 | wtsapi32.dll | NETWORK |
 | 8 | wlanapi.dll | NETWORK |
 | 9 | bcrypt.dll | (RANDOM-only) |
+| 10 | mshtml.dll | WEB (~17 MB `.text` — fits payloads > 2.5 MB) |
 
-Index 9 (`bcrypt.dll`) is reachable only via `--preset RANDOM`; the named presets cover indices 0–8 in groups of three. Builder verifies at build time that at least one of the three selected DLLs has an executable section large enough for the payload blob, and warns if none qualify.
+Index 9 (`bcrypt.dll`) is reachable only via `--preset RANDOM`; index 10 (`mshtml.dll`) only via `--preset WEB`. Builder verifies at build time that at least one of the three selected DLLs has an executable section large enough for the payload blob, and warns if none qualify. Index 10 (`mshtml.dll`) is there to allow big payloads to run after being packed.
 
 </details>
 

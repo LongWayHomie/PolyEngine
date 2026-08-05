@@ -253,7 +253,7 @@ static bool containsIc(const std::vector<std::string>& v, const std::string& s) 
 std::vector<ValidationIssue> validateConfig(const BuildConfig& cfg) {
     std::vector<ValidationIssue> issues;
     const std::vector<std::string> validExts = {".exe", ".dll", ".bin"};
-    const std::vector<std::string> validPresets = {"PRINT", "MEDIA", "NETWORK", "RANDOM"};
+    const std::vector<std::string> validPresets = {"PRINT", "MEDIA", "NETWORK", "WEB", "RANDOM"};
 
     if (trimWhitespace(cfg.inputPath).empty()) {
         issues.push_back({ValidationSeverity::Error, ValidationCode::InputRequired, "inputPath"});
