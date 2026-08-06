@@ -163,7 +163,10 @@ BOOL GetPayloadFromResource(PBYTE*  ppRawPayload,
                                               PAGE_READWRITE);
     if (!pRetPayload) { if (pdwError) *pdwError = 106; return FALSE; }
 
-    EntropyDecode(pRetPayload, rawBlob, blobSize);
+    /* Per-build alphabet: derived from the same key_salt the Builder used */
+    BYTE entropyAlphabet[16];
+    EntropyDeriveAlphabet((const BYTE*)pMeta->key_salt, entropyAlphabet);
+    EntropyDecode(pRetPayload, rawBlob, blobSize, entropyAlphabet);
 
     /* Step 5: Return all metadata to caller */
     *ppRawPayload                = pRetPayload;
