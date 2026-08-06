@@ -60,7 +60,8 @@ public:
 
     // ── config mapping ───────────────────────────────────────────────────
     BuildConfig toConfig() const;
-    std::string commandPreview() const;
+    // redactSecrets=true replaces the PFX password with a placeholder (history persistence).
+    std::string commandPreview(bool redactSecrets = false) const;
     void applyConfig(const BuildConfig& cfg);      // full restore (PfxPassword always cleared)
     void applyProfile(const BuildProfile& profile);
     void reloadProfiles();

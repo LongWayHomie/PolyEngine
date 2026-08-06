@@ -131,15 +131,18 @@ BuildConfig AppState::toConfig() const {
     return c;
 }
 
-std::string AppState::commandPreview() const {
+std::string AppState::commandPreview(bool redactSecrets) const {
     // Full command line as the operator would run it: quoted Builder.exe path + argv.
+    BuildConfig cfg = toConfig();
+    if (redactSecrets && !cfg.pfxPassword.empty())
+        cfg.pfxPassword = "********"; // persisted history must never hold the real password
     std::string preview;
     std::string builder = wideToUtf8(settings.builderPath);
     if (!builder.empty()) {
         preview += quoteArgument(builder);
         preview += ' ';
     }
-    preview += buildCommandLine(toConfig());
+    preview += buildCommandLine(cfg);
     return preview;
 }
 
@@ -334,7 +337,7 @@ void AppState::reportPostBuild(const BuildResult& result) {
     HistoryEntry entry;
     entry.timestampUnixMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    entry.commandLine = commandPreview();
+    entry.commandLine = commandPreview(true); // redacted: builds.jsonl lands on disk
     entry.config = toConfig();
     entry.success = true;
     entry.exitCode = result.exitCode;
