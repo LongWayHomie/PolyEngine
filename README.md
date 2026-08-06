@@ -677,12 +677,12 @@ Two implementation notes:
 <details>
 <summary><b>Entropy shaping — nibble-to-text payload resource</b></summary>
 
-A raw XTEA blob sits at ~7.99 bits/byte — the classic *high-entropy resource* heuristic that static scanners flag instantly. `Engine/EntropyCodec.c` maps every byte to **two characters from a 16-letter high-frequency ASCII alphabet** (`etaoinshrdlcumwf`) between the XTEA pass (Builder Phase 8.5) and the `.rsrc` write:
+A raw XTEA blob sits at ~7.99 bits/byte — the classic *high-entropy resource* heuristic that static scanners flag instantly. `Engine/EntropyCodec.c` maps every byte to **two symbols of a 16-letter lowercase ASCII alphabet** between the XTEA pass (Builder Phase 8.5) and the `.rsrc` write. The alphabet is **per-build**, not a compile-time constant: `EntropyDeriveAlphabet` draws an ordered 16-of-26 subset from `a-z` via partial Fisher-Yates, seeded by `key_salt` (a fixed alphabet would be a cross-sample fingerprint — one charset-regex retro-hunt would match every build):
 
 - `.rsrc` payload entropy drops from ~7.8 to **~4.0 bits/byte**, visually and statistically indistinguishable from text/config data
 - cost: 2x resource size
 - `metadata.blobSize` keeps the **decoded** size; the resource physically holds `blobSize*2` encoded bytes immediately before the metadata block
-- Stub decodes in `GetPayloadFromResource` (`EntropyDecode`, 256-byte reverse table on stack) into the same RW buffer XTEA then decrypts in place — no extra allocation, no crypto change
+- Stub derives the identical alphabet from `key_salt` in the metadata and decodes in `GetPayloadFromResource` (`EntropyDecode`, 256-byte reverse table on stack) into the same RW buffer XTEA then decrypts in place — no extra allocation, no crypto change
 
 </details>
 
